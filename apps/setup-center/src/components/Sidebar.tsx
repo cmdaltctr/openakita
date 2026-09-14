@@ -548,7 +548,7 @@ export function Sidebar({
               </div>
             )}
             <div className={`navItem ${view === "plugins" ? "navItemActive" : ""}`} onClick={() => onViewChange("plugins")} role="button" tabIndex={0} title={t("sidebar.plugins")}>
-              <IconPuzzle size={16} /> {!collapsed && <span>{t("sidebar.plugins")} {BETA_SUP}</span>}
+              <IconPuzzle size={16} /> {!collapsed && <span>{t("sidebar.plugins")}</span>}
             </div>
             <div className={`navItem ${view === "knowledge" ? "navItemActive" : ""}`} onClick={() => onViewChange("knowledge")} role="button" tabIndex={0} title={t("sidebar.knowledge")}>
               <IconBook size={16} /> {!collapsed && <span>{t("sidebar.knowledge")} {BETA_SUP}</span>}
