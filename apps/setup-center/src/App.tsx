@@ -1,3 +1,4 @@
+import { chatIsReady } from "./utils/backendReadiness";
 import { createContext, useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense, startTransition } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke, listen, IS_TAURI, IS_WEB, IS_CAPACITOR, IS_LOCAL_WEB, getAppVersion, onWsEvent, reconnectWsNow, setWsApiBaseUrl, logger } from "./platform";
@@ -1029,7 +1030,7 @@ function MainApp() {
               const healthData = await healthRes.json();
               const svcVersion = healthData.version || "";
               const readiness = healthData?.readiness || {};
-              const readinessReady = readiness.ready !== false;
+              const readinessReady = chatIsReady(readiness);
               const readinessPhase = String(readiness.phase || healthData.startup_phase || "");
               setApiBaseUrl(url);
               if (readinessReady) clearBackendStartingHold();
@@ -1042,7 +1043,7 @@ function MainApp() {
                 heartbeatPhase: readinessPhase || undefined,
                 heartbeatHttpReady: readiness.http_ready,
                 heartbeatImReady: readiness.im_ready,
-                heartbeatReady: readiness.ready,
+                heartbeatReady: chatIsReady(readiness),
                 lastLinkDiagnostic: healthData.last_link_diagnostic || null,
               });
               setBackendBootPhase(readinessReady ? "running" : "starting");
@@ -1244,11 +1245,11 @@ function MainApp() {
             const data = await res.json();
             if (data.version) setBackendVersion(data.version);
             const readiness = data?.readiness || {};
-            readinessReady = readiness.ready !== false;
+            readinessReady = chatIsReady(readiness);
             readinessPhase = String(readiness.phase || data.startup_phase || "");
             readinessHttpReady = readiness.http_ready;
             readinessImReady = readiness.im_ready;
-            readinessFullyReady = readiness.ready;
+            readinessFullyReady = chatIsReady(readiness);
             lastLinkDiagnostic = data.last_link_diagnostic || null;
             healthPid = typeof data.pid === "number" ? data.pid : undefined;
           } catch { /* ignore */ }
@@ -2520,7 +2521,7 @@ function MainApp() {
               const healthData = await ping.json();
               if (healthData.version) setBackendVersion(healthData.version);
               const readiness = healthData?.readiness || {};
-              const ready = readiness.ready !== false;
+              const ready = chatIsReady(readiness);
               const phase = String(readiness.phase || healthData.startup_phase || "");
               healthPid = typeof healthData.pid === "number" ? healthData.pid : undefined;
               if (ready) clearBackendStartingHold();
@@ -2534,7 +2535,7 @@ function MainApp() {
                 heartbeatPhase: phase || prev?.heartbeatPhase,
                 heartbeatHttpReady: readiness.http_ready ?? prev?.heartbeatHttpReady,
                 heartbeatImReady: readiness.im_ready ?? prev?.heartbeatImReady,
-                heartbeatReady: readiness.ready ?? prev?.heartbeatReady,
+                heartbeatReady: chatIsReady(readiness),
                 lastLinkDiagnostic: healthData.last_link_diagnostic || null,
               }));
             } catch { /* ignore parse error */ }

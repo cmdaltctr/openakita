@@ -9,6 +9,7 @@ JSON 索引: https://raw.githubusercontent.com/zhaoolee/ChineseBQB/master/chines
 发送链路: search -> download_and_cache -> deliver_artifacts(type="image")
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -57,6 +58,7 @@ class StickerEngine:
         self._keyword_index: dict[str, list[int]] = {}  # keyword -> [sticker indices]
         self._category_index: dict[str, list[int]] = {}  # category -> [sticker indices]
         self._initialized = False
+        self._initialize_lock = asyncio.Lock()
 
         # 用户配置的镜像优先，然后是内置镜像（去重保序）
         seen: set[str] = set()
@@ -67,6 +69,11 @@ class StickerEngine:
                 self._mirrors.append(m)
 
     async def initialize(self) -> bool:
+        # Background warmup and the first sticker request share one download.
+        async with self._initialize_lock:
+            return await self._initialize_unlocked()
+
+    async def _initialize_unlocked(self) -> bool:
         """
         初始化：加载索引 + 构建关键词映射
 

@@ -359,11 +359,17 @@ class MCPClient:
 
     async def connect(self, server_name: str) -> MCPConnectResult:
         """Connect a server and invalidate cached classifications for new tools."""
-        was_connected = server_name in self._connections
-        result = await self._connect_runtime(server_name)
-        if result.success and not was_connected:
-            self._invalidate_policy_classifier_cache()
-        return result
+        # Startup auto-connect and the first tool request may arrive together.
+        # Serialize only connections to the same server, not unrelated servers.
+        if not hasattr(self, "_connect_locks"):
+            self._connect_locks = {}
+        lock = self._connect_locks.setdefault(server_name, asyncio.Lock())
+        async with lock:
+            was_connected = server_name in self._connections
+            result = await self._connect_runtime(server_name)
+            if result.success and not was_connected:
+                self._invalidate_policy_classifier_cache()
+            return result
 
     async def _connect_runtime(self, server_name: str) -> MCPConnectResult:
         """
@@ -419,6 +425,8 @@ class MCPClient:
             else:
                 return await self._connect_stdio(server_name, config)
 
+        except asyncio.CancelledError:
+            raise
         except BaseException as e:
             msg = f"{type(e).__name__}: {e}"
             logger.error(f"Failed to connect to {server_name}: {msg}")
@@ -625,6 +633,9 @@ class MCPClient:
             logger.error(f"Command not found for {server_name}: {command}")
             await self._cleanup_cms(client_cm, stdio_cm)
             return MCPConnectResult(success=False, error=msg)
+        except asyncio.CancelledError:
+            await self._cleanup_cms(client_cm, stdio_cm)
+            raise
         except BaseException as e:
             stderr_hint = self._try_capture_stdio_stderr(stdio_cm)
             msg = f"stdio 连接失败: {type(e).__name__}: {e}{stderr_hint}"
@@ -707,6 +718,11 @@ class MCPClient:
             if _managed_http_client:
                 await _managed_http_client.aclose()
             return MCPConnectResult(success=False, error=msg)
+        except asyncio.CancelledError:
+            await self._cleanup_cms(client_cm, http_cm)
+            if _managed_http_client:
+                await _managed_http_client.aclose()
+            raise
         except BaseException as e:
             msg = f"HTTP 连接失败: {type(e).__name__}: {e}"
             logger.error(f"Failed to connect to {server_name} via streamable HTTP: {e}")
@@ -766,6 +782,9 @@ class MCPClient:
             logger.error(f"Timeout connecting to {server_name} via SSE")
             await self._cleanup_cms(client_cm, sse_cm)
             return MCPConnectResult(success=False, error=msg)
+        except asyncio.CancelledError:
+            await self._cleanup_cms(client_cm, sse_cm)
+            raise
         except BaseException as e:
             msg = f"SSE 连接失败: {type(e).__name__}: {e}"
             logger.error(f"Failed to connect to {server_name} via SSE: {e}")

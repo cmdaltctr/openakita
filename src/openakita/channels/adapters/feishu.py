@@ -362,7 +362,9 @@ class FeishuAdapter(ChannelAdapter):
         会自动启动 WebSocket 长连接（非阻塞模式），以便接收消息。
         SDK 会自动管理 access_token，无需手动刷新。
         """
-        _import_lark()
+        # The SDK imports thousands of modules. Keep that work off the engine
+        # loop so desktop chat remains responsive while this channel connects.
+        await asyncio.to_thread(_import_lark)
 
         # 创建客户端
         log_level = getattr(lark_oapi.LogLevel, self.config.log_level, lark_oapi.LogLevel.INFO)

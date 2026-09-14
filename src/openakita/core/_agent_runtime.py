@@ -1294,6 +1294,7 @@ class Agent:
         start_scheduler: bool = True,
         lightweight: bool = False,
         share_from: Agent | None = None,
+        defer_optional: bool = False,
     ) -> None:
         """
         初始化 Agent
@@ -1301,6 +1302,7 @@ class Agent:
         Args:
             start_scheduler: 是否启动定时任务调度器（定时任务执行时应设为 False）
             lightweight: 轻量模式（sub-agent），跳过预热、表情包、人格特征等非必要初始化
+            defer_optional: 由宿主在核心服务发布后调用 start_background_services。
             share_from: 共享一个已经完成初始化的"主 Agent"的注册表 —— skills /
                 MCP / plugins / tool catalog 全部通过引用复用，跳过 ``_load_*``
                 与 ``rebuild_engine_v2``。**仅供 lightweight=True 的 sub-agent
@@ -1323,6 +1325,8 @@ class Agent:
                 lightweight=lightweight,
                 share_from=share_from,
             )
+            if not lightweight and not defer_optional:
+                self.start_background_services()
 
     async def _initialize_unlocked(
         self,
@@ -1442,33 +1446,6 @@ class Agent:
             self._initialized = True
             return
 
-        # === 启动预热（把昂贵但可复用的初始化提前到启动阶段）===
-        # 目标：避免首条用户消息才加载 embedding/向量库、生成清单等，导致 IM 首响应显著变慢。
-        try:
-            # 1) 预热清单缓存（避免每次 build_system_prompt 都重新生成）
-            # 注意：这些方法内部已有缓存；这里调用一次确保缓存命中。
-            with contextlib.suppress(Exception):
-                self.tool_catalog.get_catalog()
-            with contextlib.suppress(Exception):
-                self.skill_catalog.get_catalog()
-            with contextlib.suppress(Exception):
-                self.mcp_catalog.get_catalog()
-
-            # 2) 预热向量库（embedding 模型 + ChromaDB）
-            # 放到线程中执行，避免阻塞事件循环；初始化完成后后续搜索会明显更快。
-            if self.memory_manager.vector_store is not None:
-                await asyncio.to_thread(lambda: bool(self.memory_manager.vector_store.enabled))
-        except Exception as e:
-            # 预热失败不应影响启动（例如 chromadb 未安装时会自动禁用）
-            logger.debug(f"[Prewarm] skipped/failed: {e}")
-
-        # === 表情包引擎初始化 ===
-        if self.sticker_engine:
-            try:
-                await self.sticker_engine.initialize()
-            except Exception as e:
-                logger.debug(f"[Sticker] initialization skipped/failed: {e}")
-
         # === 从记忆系统加载 PERSONA_TRAIT ===
         # Phase 3：用 iter_cached 替代直接遍历 _memories，自动排除
         # legacy_quarantine / pending_consolidation 这两个隔离桶 ——
@@ -1531,6 +1508,40 @@ class Agent:
                 "[share_from] registered '%s' as the process primary agent.",
                 self.name,
             )
+
+    def start_background_services(self) -> None:
+        """Warm optional capabilities after chat's required registries are ready."""
+        if getattr(self, "_optional_startup_tasks", None) is not None:
+            return
+        from openakita.startup import run_optional_startup
+
+        self.optional_startup_status = {"warmup": "starting", "mcp": "starting"}
+        self._optional_startup_tasks = []
+        for name, start in (
+            ("warmup", self._warm_optional_services),
+            ("mcp", self._connect_startup_mcp_servers),
+        ):
+
+            def publish(_result, error, name=name):
+                self.optional_startup_status[name] = "error" if error else "ready"
+
+            self._optional_startup_tasks.append(
+                asyncio.create_task(
+                    run_optional_startup(start, publish),
+                    name=f"agent-startup-{name}",
+                )
+            )
+
+    async def _warm_optional_services(self) -> None:
+        # Prompt construction has already filled the catalogs it needs. Avoid
+        # building unused catalog variants again on the critical path.
+        if self.memory_manager.vector_store is not None:
+            try:
+                await asyncio.to_thread(lambda: bool(self.memory_manager.vector_store.enabled))
+            except Exception as exc:
+                logger.debug("Vector prewarm failed: %s", exc)
+        if self.sticker_engine:
+            await self.sticker_engine.initialize()
 
     def _attach_shared_runtime(self, parent: Agent) -> None:
         """让 sub-agent 直接复用主 Agent 已经初始化好的注册表/客户端/目录。
@@ -2267,6 +2278,12 @@ class Agent:
                 s.identifier for s in self.mcp_catalog.servers if s.auto_connect
             } & all_server_names
 
+        self._startup_mcp_server_ids = auto_connect_ids
+        self._register_mcp_memory_providers()
+
+    async def _connect_startup_mcp_servers(self) -> None:
+        auto_connect_ids = getattr(self, "_startup_mcp_server_ids", set())
+        failed = []
         if auto_connect_ids:
             from ..tools.mcp_workspace import prepare_chrome_devtools_args
 
@@ -2297,16 +2314,18 @@ class Agent:
                             if count > 0:
                                 synced_any = True
                     else:
+                        failed.append(server_name)
                         logger.warning(
                             f"Auto-connect to MCP server {server_name} failed: {result.error}"
                         )
                 except Exception as e:
+                    failed.append(server_name)
                     logger.warning(f"Auto-connect to MCP server {server_name} failed: {e}")
 
             if synced_any:
                 logger.info("MCP catalog refreshed after auto-connect tool discovery")
-
-        self._register_mcp_memory_providers()
+        if failed:
+            raise RuntimeError(f"MCP auto-connect failed: {', '.join(failed)}")
 
     def _register_mcp_memory_providers(self) -> None:
         """Register opt-in MCP servers as memory providers on the main memory path."""
@@ -8430,6 +8449,10 @@ class Agent:
             errors: 遇到的错误列表
         """
         logger.info("Shutting down agent...")
+
+        from openakita.startup import cancel_startup_tasks
+
+        await cancel_startup_tasks(getattr(self, "_optional_startup_tasks", []))
 
         # 插件系统清理：dispatch on_shutdown → unload → 清全局 map
         # 只有"主" Agent（_owns_plugin_manager=True）才负责真正的 unload；

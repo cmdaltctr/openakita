@@ -1,14 +1,21 @@
 """L1 Unit Tests: StickerEngine initialization and search."""
 
+import json
+
 import pytest
-from pathlib import Path
 
 from openakita.tools.sticker import StickerEngine
 
 
 @pytest.fixture
 def sticker_engine(tmp_path):
-    return StickerEngine(data_dir=tmp_path / "stickers")
+    data_dir = tmp_path / "stickers"
+    data_dir.mkdir()
+    (data_dir / "chinesebqb_index.json").write_text(
+        json.dumps([{"name": "开心-哈哈-感谢.gif", "category": "happy", "url": "local.gif"}]),
+        encoding="utf-8",
+    )
+    return StickerEngine(data_dir=data_dir)
 
 
 class TestStickerEngineInit:

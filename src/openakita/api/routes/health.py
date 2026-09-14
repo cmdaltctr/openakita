@@ -266,10 +266,9 @@ def _get_all_lan_ips() -> list[str]:
 async def health(request: Request):
     """Basic health check - returns 200 if the HTTP API is reachable.
 
-    注意：HTTP API 可访问不等于整个后端业务已完成启动。IM 通道、晚绑定
-    gateway、后台任务可能在 HTTP 之后继续初始化。因此这里同时返回
-    ``readiness``，前端应使用 ``readiness.ready`` / ``readiness.phase`` 展示
-    "启动中 / 部分就绪 / 运行中"，而不是只看 HTTP 200。
+    HTTP 200 仅表示 API 可访问；``readiness.chat_ready``（及兼容字段
+    ``ready``）表示聊天所需的 Agent、会话和核心服务已就绪。
+    IM 通道独立使用 ``im_ready`` / ``im_status``，不阻塞桌面聊天。
     """
     import os
 
@@ -279,11 +278,17 @@ async def health(request: Request):
     readiness = getattr(request.app.state, "readiness", None)
     if not isinstance(readiness, dict):
         gateway = getattr(request.app.state, "gateway", None)
+        agent_ready = getattr(request.app.state, "agent", None) is not None
+        core_ready = getattr(request.app.state, "session_manager", None) is not None
+        chat_ready = agent_ready and core_ready
         readiness = {
             "phase": getattr(request.app.state, "startup_phase", "http_ready"),
             "http_ready": True,
+            "agent_ready": agent_ready,
+            "core_ready": core_ready,
+            "chat_ready": chat_ready,
             "im_ready": gateway is not None,
-            "ready": bool(gateway is not None),
+            "ready": chat_ready,
         }
 
     # Pull degraded subsystems from the module-level DegradedRegistry. We
