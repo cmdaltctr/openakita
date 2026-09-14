@@ -9,7 +9,8 @@ import copy
 import logging
 import re
 import threading
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import yaml
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 # would re-parse all 200+ SKILL.md files from disk.
 #
 # This module-level cache makes the parse step process-wide. Entries
-# are keyed by ``(resolved_path, mtime)`` so any on-disk edit
+# are keyed by resolved path and nanosecond timestamps plus file size so on-disk edits
 # invalidates them automatically; ``invalidate_global_parse_cache`` is
 # also exposed for explicit eviction (hooked from
 # ``skills.events.notify_skills_changed`` so install / uninstall
@@ -38,7 +39,8 @@ logger = logging.getLogger(__name__)
 # ``ParsedSkill.metadata.category`` (see ``SkillLoader.load_skill``)
 # cannot pollute the shared object.
 _GLOBAL_PARSE_CACHE_LOCK = threading.Lock()
-_GLOBAL_PARSE_CACHE: dict[tuple[str, float], "ParsedSkill"] = {}
+_ParseCacheKey = tuple[str, tuple[int, int, int]]
+_GLOBAL_PARSE_CACHE: dict[_ParseCacheKey, "ParsedSkill"] = {}
 _GLOBAL_PARSE_CACHE_MAX = 2000
 
 # SKILL.md instructions are substantially larger than their discovery metadata.
@@ -50,12 +52,12 @@ _GLOBAL_BODY_CACHE_MAX = 2000
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 
 
-def _global_cache_get(key: tuple[str, float]) -> "ParsedSkill | None":
+def _global_cache_get(key: _ParseCacheKey) -> "ParsedSkill | None":
     with _GLOBAL_PARSE_CACHE_LOCK:
         return _GLOBAL_PARSE_CACHE.get(key)
 
 
-def _global_cache_put(key: tuple[str, float], value: "ParsedSkill") -> None:
+def _global_cache_put(key: _ParseCacheKey, value: "ParsedSkill") -> None:
     with _GLOBAL_PARSE_CACHE_LOCK:
         if len(_GLOBAL_PARSE_CACHE) >= _GLOBAL_PARSE_CACHE_MAX:
             _GLOBAL_PARSE_CACHE.clear()
@@ -78,6 +80,10 @@ def invalidate_global_parse_cache(path: Path | str | None = None) -> int:
         The number of cache entries that were dropped.
     """
     import os as _os
+
+    from .metadata_cache import invalidate_metadata_caches
+
+    invalidate_metadata_caches()
 
     with _GLOBAL_PARSE_CACHE_LOCK:
         if path is None:
@@ -345,8 +351,21 @@ class SkillParser:
     # YAML frontmatter 正则
     FRONTMATTER_PATTERN = _FRONTMATTER_PATTERN
 
-    # F13: mtime-based parse cache — key: (resolved_path, mtime), value: ParsedSkill
-    _parse_cache: dict[tuple[str, float], "ParsedSkill"] = {}
+    # A discovery pass can also reuse metadata saved by a previous process.
+    _disk_cache = None
+
+    @contextmanager
+    def persistent_cache(self, path: Path):
+        from .metadata_cache import SkillMetadataCache
+
+        previous = self._disk_cache
+        cache = SkillMetadataCache(path)
+        self._disk_cache = cache
+        try:
+            yield
+        finally:
+            cache.flush()
+            self._disk_cache = previous
 
     def parse_file(self, path: Path) -> ParsedSkill:
         """
@@ -370,33 +389,32 @@ class SkillParser:
         # already parsed by a sibling Agent's SkillParser is reused
         # without touching the disk or YAML loader.
         resolved = str(path.resolve())
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            mtime = 0.0
-        cache_key = (resolved, mtime)
-
-        cached = self._parse_cache.get(cache_key)
-        if cached is None:
-            cached = _global_cache_get(cache_key)
-            if cached is not None:
-                # Promote into the local cache so subsequent calls in
-                # this parser skip the global lock entirely.
-                self._parse_cache[cache_key] = cached
+        stat = path.stat()
+        signature = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+        cache_key = (resolved, signature)
+        cached = _global_cache_get(cache_key)
         if cached is not None:
             # Hand callers a private copy — see the docstring on
             # ``_clone_parsed_skill_for_caller`` for why this matters.
             return _clone_parsed_skill_for_caller(cached)
 
-        result = self._parse_metadata_file(path)
+        result = None
+        if self._disk_cache is not None:
+            metadata = self._disk_cache.get(resolved, signature)
+            if metadata is not None:
+                try:
+                    result = self._make_parsed_skill(SkillMetadata(**metadata), path)
+                except (TypeError, ValueError, AttributeError):
+                    pass
+        if result is None:
+            result = self._parse_metadata_file(path)
+            if self._disk_cache is not None and result._body_override is None:
+                self._disk_cache.put(resolved, signature, asdict(result.metadata))
 
-        # Store the FRESH-parsed object in both caches, but hand the
+        # Store the original object in the process cache, but hand the
         # caller a deep copy so any post-parse mutation (e.g.
         # ``SkillLoader.load_skill`` rebinding ``metadata.category``)
         # cannot reach the cached object and pollute future hits.
-        if len(self._parse_cache) > 500:
-            self._parse_cache.clear()
-        self._parse_cache[cache_key] = result
         _global_cache_put(cache_key, result)
         return _clone_parsed_skill_for_caller(result)
 
