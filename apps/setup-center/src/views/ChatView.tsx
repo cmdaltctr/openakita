@@ -9,6 +9,8 @@ import { setLanguage } from "../i18n";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ProviderIcon } from "../components/ProviderIcon";
 import { AgentIcon, agentIconText } from "../components/AgentIcon";
+import { AgentMenuItem } from "./chat/components/AgentMenuItem";
+import { AgentMenuScrollArea } from "./chat/components/AgentMenuScrollArea";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -2457,6 +2459,9 @@ export function ChatView({
   useEffect(() => {
     if (!agentMenuOpen) return;
     const handler = (e: MouseEvent) => {
+      const card = e.target instanceof Element ? e.target.closest(".chatAgentDescriptionShared") : null;
+      const cardId = agentMenuRef.current?.querySelector("[data-agent-menu-card]")?.getAttribute("data-agent-menu-card");
+      if (card && card.id === cardId) return;
       if (agentMenuRef.current && !agentMenuRef.current.contains(e.target as Node)) {
         setAgentMenuOpen(false);
       }
@@ -3177,6 +3182,9 @@ export function ChatView({
   useEffect(() => {
     if (!modelMenuOpen) return;
     const handler = (e: MouseEvent) => {
+      const card = e.target instanceof Element ? e.target.closest(".chatAgentDescriptionShared") : null;
+      const cardId = modelMenuRef.current?.querySelector("[data-agent-menu-card]")?.getAttribute("data-agent-menu-card");
+      if (card && card.id === cardId) return;
       if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
         setModelMenuOpen(false);
       }
@@ -8165,7 +8173,14 @@ export function ChatView({
                   className="chatModelPickerBtn"
                   onClick={() => setModelMenuOpen((v) => !v)}
                 >
-                <span className="chatModelPickerLabel">
+                <span className="chatPickerValue">
+                  {(() => {
+                    const ep = endpoints.find(e => e.name === selectedEndpoint);
+                    return selectedEndpoint !== "auto" && ep
+                      ? <ProviderIcon slug={ep.provider} size={14} title={ep.provider} />
+                      : <IconTarget size={14} />;
+                  })()}
+                  <span className="chatPickerText">
                   {selectedEndpoint === "auto"
                     ? (() => {
                         const ap = agentProfiles.find(p => p.id === selectedAgent) || null;
@@ -8177,37 +8192,41 @@ export function ChatView({
                         return t("chat.selectModel");
                       })()
                     : (() => { const ep = endpoints.find(e => e.name === selectedEndpoint); return ep ? ep.model : selectedEndpoint; })()}
+                  </span>
                 </span>
                   <IconChevronDown size={12} />
                 </button>
                 {modelMenuOpen && (
-                  <div className="chatModelMenu">
-                  <div
-                    className={`chatModelMenuItem ${selectedEndpoint === "auto" ? "chatModelMenuItemActive" : ""}`}
-                    onClick={() => { setSelectedEndpoint("auto"); setSelectedEndpointPolicy("prefer"); setModelMenuOpen(false); }}
-                  >
-                    {t("chat.selectModel")}
-                  </div>
+                  <AgentMenuScrollArea className="chatLlmMenu">
+                  <AgentMenuItem
+                    name={t("chat.selectModel")}
+                    icon={<IconTarget size={14} />}
+                    selected={selectedEndpoint === "auto"}
+                    container={modelMenuRef.current}
+                    onSelect={() => { setSelectedEndpoint("auto"); setSelectedEndpointPolicy("prefer"); setModelMenuOpen(false); }}
+                  />
                   {endpoints.map((ep) => {
                     const hs = ep.health?.status;
                     const dotColor = hs === "healthy" ? "#22c55e" : hs === "degraded" ? "#eab308" : hs === "unhealthy" ? "#ef4444" : "#9ca3af";
+                    const healthLabel = t(`chat.modelHealth.${hs === "healthy" || hs === "degraded" || hs === "unhealthy" ? hs : "unknown"}`);
                     return (
-                      <div
+                      <AgentMenuItem
                         key={ep.name}
-                        className={`chatModelMenuItem ${selectedEndpoint === ep.name ? "chatModelMenuItemActive" : ""}`}
-                        onClick={() => { setSelectedEndpoint(ep.name); setModelMenuOpen(false); }}
-                      >
-                        <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: dotColor, marginRight: 6 }} />
-                        <span style={{ display: "inline-flex", alignItems: "center", marginRight: 6 }}>
-                          <ProviderIcon slug={ep.provider} size={14} title={ep.provider} />
-                        </span>
-                        <span style={{ fontWeight: 600 }}>{ep.model}</span>
-                        <span style={{ fontSize: 11, opacity: 0.5, marginLeft: 6 }}>{ep.name}</span>
-                      </div>
+                        name={ep.model}
+                        description={t("chat.modelDetailsText", { endpoint: ep.name, provider: ep.provider, status: healthLabel })}
+                        infoLabel={t("chat.modelDetails", { name: ep.model })}
+                        icon={<span className="chatLlmMenuIcon">
+                          <ProviderIcon slug={ep.provider} size={14} />
+                          <span className="chatLlmMenuHealth" style={{ background: dotColor }} role="img" aria-label={healthLabel} />
+                        </span>}
+                        selected={selectedEndpoint === ep.name}
+                        container={modelMenuRef.current}
+                        onSelect={() => { setSelectedEndpoint(ep.name); setModelMenuOpen(false); }}
+                      />
                     );
                   })}
                   {selectedEndpoint !== "auto" && (
-                    <div className="px-3 py-2 border-t border-border/50 text-xs text-muted-foreground">
+                    <div className="chatLlmMenuPolicy">
                       <div className="mb-1.5 font-medium text-foreground">
                         {selectedEndpointPolicy === "require"
                           ? t("chat.modelPolicyStrict", "严格使用此模型")
@@ -8215,8 +8234,8 @@ export function ChatView({
                       </div>
                       <button
                         type="button"
-                        className="chatModelMenuItem"
-                        style={{ width: "100%", justifyContent: "flex-start", padding: "6px 8px" }}
+                        data-slot="model-policy"
+                        className="chatLlmMenuPolicyButton"
                         onClick={(e) => {
                           e.stopPropagation();
                           setSelectedEndpointPolicy((p) => (p === "require" ? "prefer" : "require"));
@@ -8231,7 +8250,7 @@ export function ChatView({
                       </button>
                     </div>
                   )}
-                  </div>
+                  </AgentMenuScrollArea>
                 )}
               </div>
               {agentProfiles.length > 0 && !orgMode && (
@@ -8256,29 +8275,29 @@ export function ChatView({
                     <IconChevronDown size={12} />
                   </button>
                   {agentMenuOpen && (
-                    <div className="chatModelMenu" style={{ minWidth: 220 }}>
+                    <AgentMenuScrollArea>
                       {!agentProfiles.some(p => p.id === "default") && (
-                        <div
+                        <AgentMenuItem
                           key="__default__"
-                          className={`chatModelMenuItem ${selectedAgent === "default" ? "chatModelMenuItemActive" : ""}`}
-                          onClick={() => { setSelectedAgent("default"); setAgentMenuOpen(false); }}
-                        >
-                          <IconTarget size={14} style={{ marginRight: 6 }} />
-                          <span style={{ fontWeight: 600 }}>{t("chat.agentDefault")}</span>
-                        </div>
+                          name={t("chat.agentDefault")}
+                          icon={<IconTarget size={14} />}
+                          selected={selectedAgent === "default"}
+                          container={agentMenuRef.current}
+                          onSelect={() => { setSelectedAgent("default"); setAgentMenuOpen(false); }}
+                        />
                       )}
                       {agentProfiles.map((ap) => (
-                        <div
+                        <AgentMenuItem
                           key={ap.id}
-                          className={`chatModelMenuItem ${selectedAgent === ap.id ? "chatModelMenuItemActive" : ""}`}
-                          onClick={() => { setSelectedAgent(ap.id); setAgentMenuOpen(false); }}
-                        >
-                          <AgentIcon icon={ap.icon} size={14} apiBaseUrl={apiBaseUrl} style={{ marginRight: 6 }} />
-                          <span style={{ fontWeight: 600 }}>{ap.name}</span>
-                          <span style={{ fontSize: 11, opacity: 0.5, marginLeft: 6 }}>{ap.description}</span>
-                        </div>
+                          name={ap.name}
+                          description={ap.description}
+                          icon={<AgentIcon icon={ap.icon} size={14} apiBaseUrl={apiBaseUrl} />}
+                          selected={selectedAgent === ap.id}
+                          container={agentMenuRef.current}
+                          onSelect={() => { setSelectedAgent(ap.id); setAgentMenuOpen(false); }}
+                        />
                       ))}
-                    </div>
+                    </AgentMenuScrollArea>
                   )}
                 </div>
               )}
@@ -8316,7 +8335,7 @@ export function ChatView({
                     {orgMode ? <IconX size={10} /> : <IconChevronDown size={12} />}
                   </button>
                   {orgMenuOpen && (
-                    <div className="chatModelMenu" data-testid="chat-org-menu" style={{ minWidth: 200 }}>
+                    <div className="chatModelMenu" data-testid="chat-org-menu">
                       {orgList.map((o) => (
                         <div
                           key={o.id}
