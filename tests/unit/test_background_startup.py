@@ -260,7 +260,10 @@ async def test_mcp_connect_serializes_warmup_and_first_tool_request(monkeypatch)
 
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable_http", "sse"])
-async def test_mcp_cancelled_transport_cleans_up_and_propagates(monkeypatch, transport):
+@pytest.mark.parametrize("sdk_symbols_available", [True, False], ids=["sdk-present", "sdk-absent"])
+async def test_mcp_cancelled_transport_cleans_up_and_propagates(
+    monkeypatch, transport, sdk_symbols_available
+):
     import openakita.tools.mcp as mcp
 
     entered = asyncio.Event()
@@ -277,10 +280,18 @@ async def test_mcp_cancelled_transport_cleans_up_and_propagates(monkeypatch, tra
     client = mcp.MCPClient()
     monkeypatch.setattr(mcp, "MCP_HTTP_AVAILABLE", True)
     monkeypatch.setattr(mcp, "MCP_SSE_AVAILABLE", True)
+    # Optional SDK exports may be absent even when other transports are installed.
+    # These lifecycle tests provide their own SDK boundary instead of importing it.
     for factory in ("stdio_client", "streamablehttp_client", "sse_client"):
-        monkeypatch.setattr(mcp, factory, lambda *_args, **_kwargs: Transport())
+        if not sdk_symbols_available:
+            monkeypatch.delattr(mcp, factory, raising=False)
+        monkeypatch.setattr(mcp, factory, lambda *_args, **_kwargs: Transport(), raising=False)
+    if not sdk_symbols_available:
+        monkeypatch.delattr(mcp, "StdioServerParameters", raising=False)
+    monkeypatch.setattr(mcp, "StdioServerParameters", SimpleNamespace, raising=False)
     monkeypatch.setattr(client, "_resolve_command", lambda _: "unused")
     monkeypatch.setattr("openakita.runtime_manager.build_user_subprocess_environment", lambda _: {})
+    monkeypatch.setattr("openakita.utils.path_helper.get_macos_enriched_env", lambda env: env)
     config = mcp.MCPServerConfig(
         name="demo", command="unused", url="http://unused", transport=transport
     )
