@@ -244,6 +244,13 @@ jobs:
       - name: Sync Capacitor iOS
         run: npx cap sync ios
 
+      - name: Resolve iOS Swift package dependencies
+        working-directory: apps/setup-center/ios/App
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project App.xcodeproj \
+            -scheme App
+
       - name: Check iOS signing secrets
         id: ios_signing
         env:
@@ -351,7 +358,8 @@ jobs:
             -scheme App \
             -configuration Debug \
             -destination "generic/platform=iOS Simulator" \
-            -derivedDataPath $RUNNER_TEMP/ios-build || true
+            -derivedDataPath $RUNNER_TEMP/ios-build \
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Upload IPA artifact
         if: steps.ios_signing.outputs.has_signing == 'true'

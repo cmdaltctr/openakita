@@ -1,9 +1,10 @@
 // swift-tools-version: 5.9
 import PackageDescription
 let package = Package(
-    name: "OpenAkitaNativeAuth",
+    name: "OpenakitaNativeAuth",
     platforms: [.iOS(.v15)],
-    products: [.library(name: "OpenAkitaNativeAuth", targets: ["NativeAuthPlugin"])],
+    // Must match Capacitor's generated product name for @openakita/native-auth.
+    products: [.library(name: "OpenakitaNativeAuth", targets: ["NativeAuthPlugin"])],
     dependencies: [.package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", from: "8.0.0")],
     targets: [.target(name: "NativeAuthPlugin", dependencies: [
         .product(name: "Capacitor", package: "capacitor-swift-pm"),
