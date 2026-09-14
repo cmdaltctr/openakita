@@ -2035,9 +2035,10 @@
       "label": "Launch at Startup",
       "desc": "Automatically start the desktop app and backend service when you log in",
       "recommended": "Recommended",
-      "taskLabel": "Enable auto-start",
+      "taskLabel": "Configure auto-start",
       "success": "✓ Auto-start enabled",
-      "fail": "⚠ Failed to enable auto-start"
+      "disabled": "✓ Auto-start disabled",
+      "fail": "⚠ Failed to configure auto-start"
     },
     "progress": {
       "title": "Setting up...",

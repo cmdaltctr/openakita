@@ -3548,9 +3548,7 @@ function MainApp() {
       { id: "workspace", label: "准备工作区", status: "pending" },
     ];
     taskDefs.push({ id: "backend-check", label: "检查后端环境", status: "pending" });
-    if (obAutostart) {
-      taskDefs.push({ id: "autostart", label: t("onboarding.autostart.taskLabel"), status: "pending" });
-    }
+    taskDefs.push({ id: "autostart", label: t("onboarding.autostart.taskLabel"), status: "pending" });
     taskDefs.push({ id: "service-start", label: "启动后端服务", status: "pending" });
     taskDefs.push({ id: "http-wait", label: "等待 HTTP 服务就绪", status: "pending" });
     taskDefs.push({ id: "llm-config", label: "保存 LLM 配置", status: (savedEndpoints.length > 0 || savedCompilerEndpoints.length > 0 || savedSttEndpoints.length > 0 || savedImageEndpoints.length > 0) ? "pending" : "skipped" });
@@ -3674,10 +3672,8 @@ function MainApp() {
       }
 
       if (hasErr) {
-        if (obAutostart) {
-          updateTask("autostart", { status: "skipped", detail: "后端环境检查失败" });
-          logTask(t("onboarding.autostart.taskLabel"), "skipped", "后端环境检查失败");
-        }
+        updateTask("autostart", { status: "skipped", detail: "后端环境检查失败" });
+        logTask(t("onboarding.autostart.taskLabel"), "skipped", "后端环境检查失败");
         updateTask("service-start", { status: "skipped", detail: "后端环境检查失败" });
         logTask("启动后端服务", "skipped", "后端环境检查失败");
         updateTask("http-wait", { status: "skipped", detail: "后端环境检查失败" });
@@ -3686,21 +3682,20 @@ function MainApp() {
       }
 
       // ── STEP: autostart ──
-      if (obAutostart) {
-        updateTask("autostart", { status: "running" });
-        logTask(t("onboarding.autostart.taskLabel"), "running");
-        try {
-          await invoke("autostart_set_enabled", { enabled: true });
-          setAutostartEnabled(true);
-          log(t("onboarding.autostart.success"));
-          updateTask("autostart", { status: "done" });
-          logTask(t("onboarding.autostart.taskLabel"), "done");
-        } catch (e) {
-          log(t("onboarding.autostart.fail") + ": " + String(e));
-          updateTask("autostart", { status: "error", detail: String(e).slice(0, 120) });
-          logTask(t("onboarding.autostart.taskLabel"), "error", String(e));
-          hasErr = true;
-        }
+      // Apply both choices so opting out also clears existing OS and saved state.
+      updateTask("autostart", { status: "running" });
+      logTask(t("onboarding.autostart.taskLabel"), "running");
+      try {
+        await invoke("autostart_set_enabled", { enabled: obAutostart });
+        setAutostartEnabled(obAutostart);
+        log(t(obAutostart ? "onboarding.autostart.success" : "onboarding.autostart.disabled"));
+        updateTask("autostart", { status: "done" });
+        logTask(t("onboarding.autostart.taskLabel"), "done");
+      } catch (e) {
+        log(t("onboarding.autostart.fail") + ": " + String(e));
+        updateTask("autostart", { status: "error", detail: String(e).slice(0, 120) });
+        logTask(t("onboarding.autostart.taskLabel"), "error", String(e));
+        hasErr = true;
       }
 
       // ── STEP: service-start ──
@@ -4432,7 +4427,7 @@ function MainApp() {
 
               <div className="flex flex-col gap-2">
                 <label className="obModuleItem" data-checked={obAutostart || undefined}>
-                  <Checkbox checked={obAutostart} onCheckedChange={() => setObAutostart(!obAutostart)} />
+                  <Checkbox checked={obAutostart} onCheckedChange={(checked) => setObAutostart(checked === true)} />
                   <div className="obModuleInfo">
                     <strong>{t("onboarding.autostart.label")}</strong>
                     <span className="obModuleDesc">{t("onboarding.autostart.desc")}</span>

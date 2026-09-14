@@ -830,7 +830,8 @@ pub(crate) fn autostart_set_enabled(app: tauri::AppHandle, enabled: bool) -> Res
         // 同步持久化到 state file，用于下次启动时的自修复检查
         let mut state = read_state_file();
         state.auto_start_backend = Some(enabled);
-        let _ = write_state_file(&state);
+        write_state_file(&state)
+            .map_err(|e| format!("autostart preference save failed: {e}"))?;
         return Ok(());
     }
     #[cfg(not(desktop))]
