@@ -426,6 +426,15 @@
     "insertMessage": "Insert message",
     "downloadImage": "Save image",
     "agentDefault": "Default Agent",
+    "agentDescription": "View description for {{name}}",
+    "modelDetails": "View details for {{name}}",
+    "modelDetailsText": "Endpoint: {{endpoint}}\nProvider: {{provider}}\nStatus: {{status}}",
+    "modelHealth": {
+      "healthy": "Healthy",
+      "degraded": "Degraded",
+      "unhealthy": "Unhealthy",
+      "unknown": "Unknown"
+    },
     "agentSelect": "Select Agent",
     "agentSwitched": "Agent switched to",
     "subAgentPanel": "Sub-Agent Progress",

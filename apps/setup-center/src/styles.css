@@ -4199,7 +4199,9 @@ button.btnPrimary:hover {
   position: absolute;
   bottom: calc(100% + 4px);
   left: 0;
-  min-width: 240px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   max-height: 320px;
   overflow-y: auto;
   background: var(--bg-app);
@@ -4223,6 +4225,203 @@ button.btnPrimary:hover {
   background: rgba(37, 99, 235, 0.2);
   color: var(--brand);
   font-weight: 600;
+}
+
+.chatAgentMenu {
+  min-width: 0;
+  max-width: calc(100vw - 32px);
+  padding: 0;
+  overflow: hidden;
+}
+.chatAgentMenuViewport {
+  width: 100%;
+  max-height: 318px;
+  padding: 4px 0;
+  box-sizing: border-box;
+  border-radius: inherit;
+}
+.chatLlmMenuIcon {
+  position: relative;
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+}
+.chatLlmMenuHealth {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--bg-app);
+}
+.chatLlmMenuPolicy {
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+.chatLlmMenuPolicyButton {
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.chatLlmMenuPolicyButton:hover { background: var(--panel); }
+.chatLlmMenuPolicyButton:focus-visible { outline: 2px solid var(--brand); }
+/* Keep long names from widening Radix's intrinsic-size content wrapper. */
+.chatAgentMenuViewport > div {
+  display: block !important;
+}
+.chatAgentMenuScrollbar {
+  display: flex;
+  width: 6px;
+  margin: 4px 1px;
+  touch-action: none;
+  user-select: none;
+  z-index: 1;
+}
+.chatAgentMenuThumb {
+  flex: 1;
+  min-height: 24px;
+  border-radius: 3px;
+  background: var(--line);
+}
+.chatAgentMenuThumb:hover {
+  background: var(--muted2);
+}
+.chatAgentMenuItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  min-height: 40px;
+  box-sizing: border-box;
+  padding: 0 8px 0 0;
+}
+.chatAgentMenuSelect {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 4px 8px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.chatAgentMenuItem.chatModelMenuItemActive:hover {
+  background: rgba(37, 99, 235, 0.2);
+}
+.chatAgentMenuItem[data-hovered="false"]:not(.chatModelMenuItemActive):hover {
+  background: transparent;
+}
+.chatAgentMenuItem[data-hovered="true"]:not(.chatModelMenuItemActive) {
+  background: var(--panel);
+}
+.chatAgentMenuInfo {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.chatAgentMenuInfo:hover { color: var(--brand); }
+@media (hover: none) and (pointer: coarse) {
+  .chatAgentMenuItem {
+    grid-template-columns: minmax(0, 1fr) 28px;
+  }
+  .chatAgentMenuInfo {
+    display: flex;
+  }
+}
+.chatAgentMenuSelect:focus-visible,
+.chatAgentMenuInfo:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+.chatAgentMenuIcon,
+.chatAgentMenuCheck {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+}
+.chatAgentMenuName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chatAgentMenuName {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 20px;
+}
+.chatAgentDescriptionCard {
+  z-index: 110;
+  box-sizing: border-box;
+  width: 280px;
+  max-width: calc(100vw - 24px);
+  max-height: min(360px, var(--radix-hover-card-content-available-height));
+  overflow-y: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-app);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.chatAgentDescriptionTitle {
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.chatAgentDescriptionShared {
+  position: fixed;
+  padding: 0;
+  max-height: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+.chatAgentDescriptionShared[data-animate-position="true"] {
+  transition: opacity 160ms ease, left 180ms ease, top 180ms ease, width 180ms ease, height 180ms ease;
+}
+.chatAgentDescriptionShared[data-open="true"] {
+  opacity: 1;
+  pointer-events: auto;
+  @starting-style { opacity: 0; }
+}
+.chatAgentDescriptionBody {
+  padding: 12px;
+  animation: chatAgentDescriptionFade 180ms ease;
+}
+@keyframes chatAgentDescriptionFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chatAgentDescriptionShared,
+  .chatAgentDescriptionShared[data-animate-position="true"] { transition: none; }
+  .chatAgentDescriptionBody { animation: none; }
 }
 
 .chatInputTextarea {
@@ -6716,6 +6915,7 @@ button.btnPrimary:hover {
   .chatInputBox textarea { font-size: 16px !important; }
   .chatInputBox { border-radius: 12px !important; }
   .chatInputTop {
+    position: relative;
     gap: 6px;
     padding: 8px 8px 0;
   }
@@ -6724,10 +6924,6 @@ button.btnPrimary:hover {
   }
   .chatModelMenu {
     max-width: calc(100vw - 32px);
-  }
-  .chatPickerGroupAgent .chatModelMenu {
-    left: 50%;
-    transform: translateX(-50%);
   }
   .chatPickerGroupOrg .chatModelMenu {
     right: 0;

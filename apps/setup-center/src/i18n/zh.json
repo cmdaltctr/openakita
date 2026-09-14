@@ -426,6 +426,15 @@
     "insertMessage": "插入消息",
     "downloadImage": "保存图片",
     "agentDefault": "默认 Agent",
+    "agentDescription": "查看 {{name}} 的简介",
+    "modelDetails": "查看 {{name}} 的详情",
+    "modelDetailsText": "端点：{{endpoint}}\n服务商：{{provider}}\n状态：{{status}}",
+    "modelHealth": {
+      "healthy": "正常",
+      "degraded": "性能下降",
+      "unhealthy": "异常",
+      "unknown": "未知"
+    },
     "agentSelect": "选择 Agent",
     "agentSwitched": "已切换到 Agent",
     "subAgentPanel": "子 Agent 进度",
