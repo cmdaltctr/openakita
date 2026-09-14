@@ -288,6 +288,16 @@ class SkillLoader:
         *,
         load_filter: SkillLoadFilter | None = None,
     ) -> int:
+        cache_path = (base_path or Path.cwd()) / "data" / "cache" / "skill-metadata.json"
+        with self.parser.persistent_cache(cache_path):
+            return self._load_all(base_path, load_filter=load_filter)
+
+    def _load_all(
+        self,
+        base_path: Path | None = None,
+        *,
+        load_filter: SkillLoadFilter | None = None,
+    ) -> int:
         """
         从所有标准目录加载技能
 
@@ -356,10 +366,26 @@ class SkillLoader:
         except ImportError:
             return 0
 
-        try:
-            distributions = list(importlib_metadata.distributions())
-        except Exception:
-            return 0
+        # Reading METADATA for every installed package dominated this discovery
+        # pass on Windows. Filter directory names before opening distribution
+        # metadata; only cli-anything packages can contribute these skills.
+        distributions = []
+        seen: set[Path] = set()
+        for entry in sys.path:
+            root = Path(entry or ".")
+            try:
+                for candidate in root.iterdir():
+                    name = candidate.name.lower().replace("-", "_")
+                    if not name.startswith("cli_anything") or not name.endswith(
+                        (".dist_info", ".egg_info")
+                    ):
+                        continue
+                    resolved = candidate.resolve()
+                    if resolved not in seen:
+                        seen.add(resolved)
+                        distributions.append(importlib_metadata.Distribution.at(candidate))
+            except OSError:
+                continue
 
         for dist in distributions:
             name = (dist.metadata.get("Name") or "").lower()

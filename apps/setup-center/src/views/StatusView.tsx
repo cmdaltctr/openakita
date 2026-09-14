@@ -242,11 +242,12 @@ export function StatusView(props: StatusViewProps) {
   // → 红条闪一下 → 后端真起来后又变绿"的诡异闪烁。
   const isRunning = !!serviceStatus?.running;
   const heartbeatPhase = serviceStatus?.heartbeatPhase || "";
-  const phaseStarting =
-    backendBootPhase === "starting" ||
-    (isRunning && serviceStatus?.heartbeatReady === false) ||
-    ["starting", "initializing", "http_ready", "starting_im"].includes(heartbeatPhase) ||
-    (backendBootPhase === "unknown" && serviceStatus === null);
+    const phaseStarting =
+    !(isRunning && serviceStatus?.heartbeatReady === true) &&
+    (backendBootPhase === "starting" ||
+      (isRunning && serviceStatus?.heartbeatReady === false) ||
+      ["starting", "initializing", "http_ready", "starting_im"].includes(heartbeatPhase) ||
+      (backendBootPhase === "unknown" && serviceStatus === null));
   const showStartingBanner = IS_TAURI && phaseStarting && effectiveWsId;
   const showNotRunningBanner =
     IS_TAURI &&

@@ -839,12 +839,16 @@ def create_app(
     from openakita.runtime_config_coordinator import RuntimeConfigCoordinator
 
     app.state.runtime_config_coordinator = RuntimeConfigCoordinator(app.state)
-    app.state.startup_phase = "http_ready" if gateway is None else "running"
+    chat_ready = agent is not None and session_manager is not None
+    app.state.startup_phase = "running" if chat_ready else "http_ready"
     app.state.readiness = {
         "phase": app.state.startup_phase,
         "http_ready": True,
+        "agent_ready": agent is not None,
+        "core_ready": session_manager is not None,
+        "chat_ready": chat_ready,
         "im_ready": gateway is not None,
-        "ready": gateway is not None,
+        "ready": chat_ready,
     }
 
     if agent is not None:

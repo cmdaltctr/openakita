@@ -416,8 +416,15 @@ def ensure_channel_dependencies(
     workspace_env: dict[str, str] | None = None,
     print_fn: PrintFn | None = None,
     progress_fn: ProgressFn | None = None,
+    install_missing: bool = True,
+    import_check: bool = True,
 ) -> dict:
-    """Install missing optional IM dependencies into the isolated channel target."""
+    """Check optional IM dependencies, installing only on an explicit setup path.
+
+    Normal service startup uses ``import_check=False, install_missing=False``:
+    finding a top-level module does not execute a large SDK or invoke pip.
+    Actual adapter imports still validate that the installed SDK works.
+    """
     _patch_backports_zstd()
     patch_simplejson_jsondecodeerror(logger=logger)
     try:
@@ -438,7 +445,10 @@ def ensure_channel_dependencies(
     for channel in enabled_channels:
         for import_name, pip_name in CHANNEL_DEPS.get(channel, []):
             try:
-                importlib.import_module(import_name)
+                if import_check:
+                    importlib.import_module(import_name)
+                elif importlib.util.find_spec(import_name) is None:
+                    raise ImportError(f"No module named {import_name}")
             except ImportError as exc:
                 if (
                     import_name == "lark_oapi"
@@ -481,6 +491,17 @@ def ensure_channel_dependencies(
 
     if not missing:
         return {"status": "ok", "installed": [], "missing": [], "message": "所有依赖已就绪"}
+
+    if not install_missing:
+        return {
+            "status": "error",
+            "installed": [],
+            "missing": missing,
+            "errors": dict.fromkeys(
+                missing, "Dependency missing; enable or repair the channel in Settings"
+            ),
+            "message": "Missing channel dependencies; repair the channel in Settings",
+        }
 
     pkg_list = ", ".join(missing)
     py = _select_pip_python()

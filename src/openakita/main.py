@@ -6,6 +6,8 @@ OpenAkita CLI 入口
 支持多 Agent 协同模式（通过 ORCHESTRATION_ENABLED 配置）
 """
 
+from __future__ import annotations
+
 import openakita._ensure_utf8  # noqa: F401  # isort: skip
 
 import asyncio
@@ -17,6 +19,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
@@ -31,9 +34,11 @@ _executed_main = sys.modules.get("__main__")
 if __name__ == "__main__" and getattr(_executed_main, "__dict__", None) is globals():
     sys.modules["openakita.main"] = _executed_main
 
-from .agent.core import Agent
 from .config import settings
 from .logging import setup_logging
+
+if TYPE_CHECKING:
+    from .agent.core import Agent
 
 # MCP stdio 子进程模式：stdout 专属 JSONRPC 协议，禁止一切控制台日志输出
 _is_mcp_subprocess = "run-mcp-module" in sys.argv
@@ -134,6 +139,8 @@ def get_agent() -> Agent:
     """获取或创建 Agent 实例（单 Agent 模式）"""
     global _agent
     if _agent is None:
+        from .agent.core import Agent
+
         _agent = Agent()
     return _agent
 
@@ -475,9 +482,15 @@ async def start_im_channels(agent_or_master):
     if any_enabled:
         _report_progress({"phase": "checking"})
         try:
-            # Dependency installation uses blocking subprocess calls. Keep it off
-            # the API event loop so status polling remains responsive.
-            channel_deps_result = await asyncio.to_thread(_ensure_channel_deps, _report_progress)
+            # Normal startup only locates SDKs. Installation belongs to explicit
+            # setup/repair, and full SDK imports happen when adapters start.
+            from openakita.runtime_channel_deps import ensure_channel_dependencies
+
+            channel_deps_result = await asyncio.to_thread(
+                ensure_channel_dependencies,
+                install_missing=False,
+                import_check=False,
+            )
         except Exception as e:
             logger.error(
                 f"IM channel dependency check failed ({type(e).__name__}: {e}), "
@@ -2187,6 +2200,8 @@ def serve(
         nonlocal shutdown_event, agent_or_master, shutdown_triggered
         nonlocal _heartbeat_phase, _heartbeat_http_ready, _heartbeat_im_ready, _heartbeat_ready
         shutdown_cleanup_started = False
+        startup_started_at = time.perf_counter()
+        startup_tasks: list[asyncio.Task] = []
         _install_windows_asyncio_pipe_filter()
         shutdown_event = asyncio.Event()
         shutdown_triggered = False
@@ -2203,7 +2218,12 @@ def serve(
         try:
             from .runtime_env import log_runtime_environment_report
 
-            log_runtime_environment_report()
+            startup_tasks.append(
+                asyncio.create_task(
+                    asyncio.to_thread(log_runtime_environment_report),
+                    name="startup-runtime-report",
+                )
+            )
         except Exception:
             logger.debug("Failed to log runtime environment report", exc_info=True)
 
@@ -2217,9 +2237,6 @@ def serve(
                 border_style="blue",
             )
         )
-
-        agent = get_agent()
-        agent_or_master = agent
 
         # 先启动 HTTP API（供 Setup Center/桌面端使用）。Agent 初始化、
         # 核心服务和 IM 通道可能很慢，不能阻塞 /api/health 与 Web UI 就绪。
@@ -2292,6 +2309,7 @@ def serve(
                         "http_ready": True,
                         "agent_ready": False,
                         "core_ready": False,
+                        "chat_ready": False,
                         "im_ready": False,
                         "ready": False,
                     },
@@ -2315,7 +2333,9 @@ def serve(
 
         if not _api_fatal:
             console.print("[bold green]正在初始化 Agent...[/bold green]")
-            await agent.initialize()
+            agent = get_agent()
+            agent_or_master = agent
+            await agent.initialize(defer_optional=True)
             console.print(f"[green]✓[/green] Agent 已初始化 (技能: {agent.skill_registry.count})")
 
             if api_task is not None:
@@ -2331,6 +2351,7 @@ def serve(
                             "http_ready": True,
                             "agent_ready": True,
                             "core_ready": False,
+                            "chat_ready": False,
                             "im_ready": False,
                             "ready": False,
                         },
@@ -2352,65 +2373,81 @@ def serve(
                         session_manager=_session_manager,
                         orchestrator=_orchestrator,
                         agent_pool=_desktop_pool,
-                        startup_phase="http_ready",
+                        startup_phase="running",
                         readiness={
-                            "phase": "http_ready",
+                            "phase": "running",
                             "http_ready": True,
                             "agent_ready": True,
                             "core_ready": True,
+                            "chat_ready": True,
                             "im_ready": False,
-                            "ready": False,
+                            "im_status": "starting",
+                            "ready": True,
                         },
                     )
                 except Exception:
                     logger.debug("Failed to update API core readiness", exc_info=True)
 
-            # 启动 IM 通道（可选）。放在 HTTP API 之后，避免首次安装通道依赖时
-            # 桌面端长时间无法访问本地健康检查。
-            _heartbeat_phase = "starting_im"
-            _heartbeat_http_ready = True
-            _heartbeat_im_ready = False
-            _heartbeat_ready = False
-            _write_heartbeat()
-            console.print("[bold green]正在启动 IM 通道...[/bold green]")
-            im_channels = await start_im_channels(agent_or_master)
-
-            if im_channels:
-                console.print(f"[green]✓[/green] IM 通道已启动: {', '.join(im_channels)}")
-            else:
-                console.print("[yellow]ℹ[/yellow] 未启用 IM 通道（HTTP API 仍可使用）")
-
-            # 注入 shutdown_event 到网关（供终极重启指令使用），并把晚启动的网关
-            # 回填给已经运行的 FastAPI app state。
-            if _message_gateway is not None:
-                _message_gateway.set_shutdown_event(shutdown_event)
-            if api_task is not None:
-                try:
-                    from openakita.api.server import update_runtime_refs
-
-                    update_runtime_refs(
-                        api_task,
-                        gateway=_message_gateway,
-                        startup_phase="running",
-                        readiness={
-                            "phase": "running",
-                            "http_ready": True,
-                            "im_ready": True,
-                            "ready": True,
-                            "started_im_channels": im_channels,
-                            "gateway_bound": _message_gateway is not None,
-                        },
-                    )
-                except Exception:
-                    logger.debug("Failed to update API runtime readiness", exc_info=True)
-
-            # 到这里才是真正的 serve 启动完成：HTTP API 可访问，IM 启动路径也已收敛
-            # （即便没有启用 IM 或某些 adapter 失败，后台服务也已完成启动流程）。
+            # Desktop readiness depends on the chat runtime, not IM connectivity.
             _heartbeat_phase = "running"
             _heartbeat_http_ready = True
-            _heartbeat_im_ready = True
+            _heartbeat_im_ready = False
             _heartbeat_ready = True
             _write_heartbeat()
+            logger.info(
+                "Desktop chat ready in %.3fs; IM and optional warmups continue in background",
+                time.perf_counter() - startup_started_at,
+            )
+
+            agent.start_background_services()
+
+            def publish_im_startup(im_channels, error):
+                nonlocal _heartbeat_im_ready
+                if shutdown_event.is_set():
+                    return
+                from openakita.api.server import update_runtime_refs
+
+                failed = []
+                if _message_gateway is not None:
+                    _message_gateway.set_shutdown_event(shutdown_event)
+                    failed = _message_gateway.get_failed_adapters()
+                _heartbeat_im_ready = error is None and not failed
+                im_status = "error" if error else "degraded" if failed else "ready"
+                update_runtime_refs(
+                    api_task,
+                    gateway=_message_gateway,
+                    readiness={
+                        "phase": "running",
+                        "http_ready": True,
+                        "agent_ready": True,
+                        "core_ready": True,
+                        "chat_ready": True,
+                        "ready": True,
+                        "im_ready": _heartbeat_im_ready,
+                        "im_status": im_status,
+                        "started_im_channels": im_channels or [],
+                        "failed_im_channels": failed,
+                        "gateway_bound": _message_gateway is not None,
+                    },
+                )
+                _write_heartbeat()
+                logger.info(
+                    "IM startup finished in %.3fs (status=%s)",
+                    time.perf_counter() - startup_started_at,
+                    im_status,
+                )
+
+            from openakita.startup import run_optional_startup
+
+            startup_tasks.append(
+                asyncio.create_task(
+                    run_optional_startup(
+                        lambda: start_im_channels(agent_or_master),
+                        publish_im_startup,
+                    ),
+                    name="startup-im",
+                )
+            )
 
         console.print()
         if dev:
@@ -2466,6 +2503,9 @@ def serve(
             # this entire teardown specifically for Ctrl+C shutdowns.
             if not shutdown_cleanup_started:
                 shutdown_cleanup_started = True
+                from openakita.startup import cancel_startup_tasks
+
+                await cancel_startup_tasks(startup_tasks)
                 is_restart = cfg._restart_requested
                 # 更新心跳状态为重启/停止中
                 _heartbeat_phase = "restarting" if is_restart else "stopping"
