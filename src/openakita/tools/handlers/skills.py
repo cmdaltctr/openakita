@@ -95,6 +95,18 @@ class SkillsHandler:
     async def handle(self, tool_name: str, params: dict[str, Any]) -> str:
         """处理工具调用"""
         try:
+            if tool_name in {
+                "get_skill_info", "run_skill_script", "get_skill_reference",
+                "reload_skill", "manage_skill_enabled", "execute_skill", "uninstall_skill",
+            }:
+                key = params.get("skill_name")
+                if isinstance(key, str):
+                    ambiguity = self._ambiguous_skill_hint(key)
+                    if ambiguity:
+                        return ambiguity
+                    entry = self.agent.skill_registry.get(key)
+                    if entry is not None:
+                        params = {**params, "skill_name": entry.skill_id}
             if tool_name == "list_skills":
                 return self._list_skills(params)
             elif tool_name == "get_skill_info":
@@ -123,6 +135,25 @@ class SkillsHandler:
         except Exception as e:
             logger.error("Unexpected error in skills handler %s: %s", tool_name, e, exc_info=True)
             return f"❌ 技能操作失败: {e}"
+
+    def _ambiguous_skill_hint(self, key: str) -> str | None:
+        from openakita.skills.registry import SkillRegistry
+
+        registry = self.agent.skill_registry
+        if not isinstance(registry, SkillRegistry):
+            return None
+        candidates = registry.name_candidates(key)
+        if len(candidates) < 2:
+            return None
+        lines = [f"技能名称 '{key}' 对应多个技能，请明确选择 skill_id 后重试："]
+        for skill in candidates:
+            state = "已禁用" if skill.disabled else "可用"
+            lines.append(
+                f"- {skill.skill_id}: {skill.marketplace_name or skill.name} "
+                f"[{state}] — {skill.description[:120]}"
+            )
+        lines.append("如果用户意图不足以区分这些候选，请先询问用户，不要任意选择。")
+        return "\n".join(lines)
 
     def _list_skills(self, params: dict) -> str:
         """列出所有技能，区分启用/禁用/可发现状态"""
@@ -157,6 +188,9 @@ class SkillsHandler:
         )
 
         def display_name(skill) -> str:
+            official = getattr(skill, "marketplace_name", None)
+            if isinstance(official, str) and official:
+                return f"{official} ({skill.skill_id})"
             zh_name = skill.name_i18n.get("zh", "")
             return f"{skill.name} ({zh_name})" if zh_name else skill.name
 
@@ -305,6 +339,9 @@ class SkillsHandler:
         """获取技能详细信息（自动内联引用的子文件）"""
         skill_name = params["skill_name"]
         user_args = params.get("args", {})
+        ambiguity = self._ambiguous_skill_hint(skill_name)
+        if ambiguity:
+            return ambiguity
         skill = self.agent.skill_registry.get(skill_name)
 
         if not skill or skill.disabled:
@@ -348,7 +385,7 @@ class SkillsHandler:
             skill_dir = Path(exposed.skill_path).parent
             body = self._inline_referenced_files(body, skill_dir)
 
-        output = f"# 技能: {skill.name}\n\n"
+        output = f"# 技能: {getattr(skill, 'marketplace_name', None) or skill.name}\n\n"
         output += f"**ID**: {skill.skill_id}\n"
         output += f"**描述**: {skill.description}\n"
         if skill.when_to_use:

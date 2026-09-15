@@ -187,6 +187,7 @@ const _HASH_TO_STEP: Record<string, StepId> = {
 
 function _parseHashRoute(hash: string): { view: ViewId; stepId?: StepId } | null {
   const path = hash.replace(/^#\/?/, "");
+  if (path.startsWith("skills?")) return { view: "skills" };
   if (!path) return null;
   if (_HASH_TO_VIEW[path]) return { view: _HASH_TO_VIEW[path] };
   if (path.startsWith("config/")) {
@@ -4703,6 +4704,7 @@ function MainApp() {
         </div>
       ) : (
         <SkillManager
+          desktopVersion={desktopVersion}
           venvDir={venvDir}
           currentWorkspaceId={currentWorkspaceId}
           envDraft={envDraft}

@@ -566,6 +566,8 @@ class MarketplaceInstallManager:
                     source, job["resource_slug"], request,
                     resource_category=job.get("resource_category"),
                     marketplace_manifest=read_json_safe(source / "manifest.json"),
+                    resource_name=job.get("resource_name"),
+                    marketplace_endpoint=job.get("endpoint"),
                 )
                 job["skill_enabled"] = enabled
                 return restart_required
@@ -632,6 +634,8 @@ class MarketplaceInstallManager:
     async def _install_skill(
         source: Path, resource_slug: str, request: Any, *, resource_category: Any = None,
         marketplace_manifest: dict[str, Any] | None = None,
+        resource_name: str | None = None,
+        marketplace_endpoint: str | None = None,
     ) -> tuple[bool, bool]:
         skill_source = source
         if not (skill_source / "SKILL.md").is_file():
@@ -653,6 +657,24 @@ class MarketplaceInstallManager:
             if marketplace_manifest is not None:
                 await asyncio.to_thread(
                     atomic_json_write, staging / "manifest.json", marketplace_manifest,
+                    backup=False, fsync=True,
+                )
+            from openakita.skills.marketplace import MARKETPLACE_INSTALL_RECORD
+
+            # Receipts belong to this installation, never to the downloaded ZIP.
+            (staging / MARKETPLACE_INSTALL_RECORD).unlink(missing_ok=True)
+            if marketplace_manifest is not None and isinstance(resource_name, str) and resource_name.strip():
+                await asyncio.to_thread(
+                    atomic_json_write, staging / MARKETPLACE_INSTALL_RECORD,
+                    {
+                        "resource_id": marketplace_manifest.get("resource_id"),
+                        "resource_type": "skill",
+                        "version": marketplace_manifest.get("version"),
+                        "resource_slug": resource_slug,
+                        "resource_name": resource_name.strip(),
+                        "endpoint": marketplace_endpoint,
+                        "resource_category": resource_category,
+                    },
                     backup=False, fsync=True,
                 )
             if target.exists():

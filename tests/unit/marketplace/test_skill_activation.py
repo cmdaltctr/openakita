@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from zipfile import ZipFile
@@ -10,6 +11,51 @@ from openakita.integrations.marketplace.installer import (
 )
 from openakita.skills import allowlist_io
 from openakita.skills.loader import SkillLoader
+
+
+@pytest.mark.asyncio
+async def test_installed_skill_api_exposes_persisted_marketplace_identity(installation):
+    from openakita.api.routes.skills import _build_skills_list_response
+
+    source, loader = installation
+    original_content = (source / "SKILL.md").read_bytes()
+    await MarketplaceInstallManager._install_skill(
+        source,
+        "demo",
+        None,
+        marketplace_manifest={
+            "resource_id": "resource_demo",
+            "resource_type": "skill",
+            "version": "1.0.0",
+        },
+        resource_name="Official Demo Name",
+    )
+    # Even disabled resources are installed. Re-scan disk as a fresh page load does.
+    allowlist_io.overwrite_allowlist(set())
+    result = await _build_skills_list_response(None)
+    demo = next(skill for skill in result["skills"] if skill["skill_id"] == "demo")
+    assert demo["marketplace_resource_id"] == "resource_demo"
+    assert demo["marketplace_name"] == "Official Demo Name"
+    assert demo["name"] == "demo"
+    installed_path = Path(loader.registry.get("demo").skill_path)
+    assert installed_path.read_bytes() == original_content
+    assert demo["enabled"] is False
+
+    await MarketplaceInstallManager._install_skill(
+        source,
+        "demo",
+        None,
+        marketplace_manifest={
+            "resource_id": "resource_demo",
+            "resource_type": "skill",
+            "version": "2.0.0",
+        },
+        resource_name="Updated Official Name",
+    )
+    updated = await _build_skills_list_response(None)
+    demo = next(skill for skill in updated["skills"] if skill["skill_id"] == "demo")
+    assert demo["marketplace_name"] == "Updated Official Name"
+    assert installed_path.read_bytes() == original_content
 
 
 @pytest.fixture

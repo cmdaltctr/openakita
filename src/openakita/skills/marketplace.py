@@ -7,8 +7,10 @@ stable representation consumed by OpenAkita's API, desktop bridge, and UI.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
@@ -17,6 +19,93 @@ SKILLHUB_PROVIDER = "skillhub"
 SKILLHUB_API_BASE = "https://api.skillhub.cn"
 SKILLHUB_SKILLS_API = f"{SKILLHUB_API_BASE}/api/skills"
 SKILLHUB_DOWNLOAD_API = f"{SKILLHUB_API_BASE}/api/v1/download"
+
+MARKETPLACE_INSTALL_RECORD = ".openakita-marketplace.json"
+
+
+def _read_local_metadata(path: Path) -> dict:
+    try:
+        with path.open(encoding="utf-8") as stream:
+            data = json.loads(stream.read(1024 * 1024))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def installed_marketplace_names(
+    skill_paths: list[str | Path],
+    jobs_dir: Path | None = None,
+) -> dict[str, str]:
+    """Resolve official display names offline, without changing skill identifiers.
+
+    Older installations have no local receipt; recover their names from successful
+    installation history only when both resource ID and installed version match.
+    """
+    if jobs_dir is None:
+        from openakita.config import settings
+
+        jobs_dir = settings.openakita_home / "marketplace" / "jobs"
+    history: dict[tuple[str, str], tuple[float, str]] = {}
+    for path in jobs_dir.glob("*.json"):
+        job = _read_local_metadata(path)
+        if job.get("status") != "installed" or job.get("resource_type") != "skill":
+            continue
+        rid, version, name = (job.get(key) for key in ("resource_id", "version", "resource_name"))
+        if not all(isinstance(value, str) and value.strip() for value in (rid, version, name)):
+            continue
+        stamp = job.get("created_at", 0)
+        stamp = stamp if isinstance(stamp, (int, float)) else 0
+        key = (rid, version)
+        if key not in history or stamp >= history[key][0]:
+            history[key] = (stamp, name.strip())
+
+    names = {}
+    for skill_path in skill_paths:
+        directory = Path(skill_path).parent
+        manifest = _read_local_metadata(directory / "manifest.json")
+        rid, version = manifest.get("resource_id"), manifest.get("version")
+        if (
+            manifest.get("resource_type") != "skill"
+            or not isinstance(rid, str)
+            or not isinstance(version, str)
+        ):
+            continue
+        receipt = _read_local_metadata(directory / MARKETPLACE_INSTALL_RECORD)
+        name = receipt.get("resource_name")
+        if (
+            receipt.get("resource_id") == rid
+            and receipt.get("version") == version
+            and receipt.get("resource_type") == "skill"
+            and isinstance(name, str)
+            and name.strip()
+        ):
+            names[str(skill_path)] = name.strip()
+        elif (rid, version) in history:
+            names[str(skill_path)] = history[(rid, version)][1]
+    return names
+
+
+def installed_marketplace_resource_id(skill_path: str | Path | None) -> str | None:
+    """Read catalog identity from the manifest retained by the official installer.
+
+    This is display metadata, not an entitlement or signature verification.
+    Never infer identity from a directory name or the skill's display name.
+    """
+    if not skill_path:
+        return None
+    try:
+        manifest_path = Path(skill_path).parent / "manifest.json"
+        with manifest_path.open(encoding="utf-8") as stream:
+            manifest = json.loads(stream.read(1024 * 1024))
+        if not isinstance(manifest, dict) or manifest.get("resource_type") != "skill":
+            return None
+        resource_id = manifest.get("resource_id")
+        if isinstance(resource_id, str) and resource_id.strip():
+            return resource_id.strip()
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
 
 _COORDINATE_PART_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9_.+-]+$")

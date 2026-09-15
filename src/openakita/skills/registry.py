@@ -144,6 +144,7 @@ class SkillEntry:
 
     # 国际化（由 agents/openai.yaml i18n 字段注入，兼容旧的 .openakita-i18n.json）
     name_i18n: dict[str, str] = field(default_factory=dict)
+    marketplace_name: str | None = None
     description_i18n: dict[str, str] = field(default_factory=dict)
 
     # 技能配置 schema（从 SKILL.md frontmatter 传递）
@@ -193,7 +194,7 @@ class SkillEntry:
 
     def get_display_name(self, lang: str = "zh") -> str:
         """按语言返回显示名称，找不到则回退到 name"""
-        return self.name_i18n.get(lang, self.name)
+        return self.marketplace_name or self.name_i18n.get(lang, self.name)
 
     def get_display_description(self, lang: str = "zh") -> str:
         """按语言返回显示描述，找不到则回退到 description"""
@@ -488,7 +489,7 @@ class SkillRegistry:
         entry = self._skills.get(key)
         if entry is not None:
             return entry
-        matches = [e for e in self._skills.values() if e.name == key]
+        matches = self.name_candidates(key)
         if len(matches) > 1:
             logger.warning(
                 "Ambiguous skill name '%s' matches %d entries: %s — refusing fuzzy resolution",
@@ -501,20 +502,20 @@ class SkillRegistry:
 
     def _resolve_id(self, key: str) -> str | None:
         """将 key 解析为实际的 skill_id。"""
+        entry = self._resolve(key)
+        return entry.skill_id if entry else None
+
+    def name_candidates(self, key: str) -> list[SkillEntry]:
+        """Exact IDs take priority; display-name collisions require an explicit ID."""
         if key in self._skills:
-            return key
-        matches = [sid for sid, e in self._skills.items() if e.name == key]
-        if len(matches) > 1:
-            logger.warning(
-                "Ambiguous skill name '%s' matches %d entries: %s — refusing fuzzy resolution",
-                key,
-                len(matches),
-                matches,
-            )
-            return None
-        if matches:
-            return matches[0]
-        return None
+            return [self._skills[key]]
+        return sorted(
+            [
+                entry for entry in self._skills.values()
+                if key == entry.name or (entry.marketplace_name and key == entry.marketplace_name)
+            ],
+            key=lambda entry: entry.skill_id,
+        )
 
     def register(
         self,
@@ -564,6 +565,15 @@ class SkillRegistry:
             self._record_conflict(action="overridden", winner=entry, loser=existing)
 
         self._skills[entry.skill_id] = entry
+        if entry.skill_path and not entry.system:
+            from pathlib import Path
+
+            from .marketplace import installed_marketplace_names
+
+            if (Path(entry.skill_path).parent / "manifest.json").is_file():
+                entry.marketplace_name = installed_marketplace_names([entry.skill_path]).get(
+                    str(entry.skill_path)
+                )
         # C10: this skill's exposed tool name may have a freshly-declared
         # approval_class. Invalidate the classifier's cached entry (if any)
         # so the next classify() picks up SKILL_METADATA instead of a stale
@@ -715,6 +725,7 @@ class SkillRegistry:
                 "namespace": skill.namespace,
                 "origin": skill.origin,
                 "name": skill.name,
+                "marketplace_name": skill.marketplace_name,
                 "description": skill.description,
                 "auto_invoke": not skill.disable_model_invocation,
             }
@@ -922,7 +933,11 @@ class SkillRegistry:
             sid = skill.skill_id.lower()
             sname = skill.name.lower()
 
-            if sid in context_lower or sname in context_lower:
+            if (
+                sid in context_lower
+                or sname in context_lower
+                or skill.marketplace_name and skill.marketplace_name.lower() in context_lower
+            ):
                 score += 10
 
             for kw in skill.keywords:

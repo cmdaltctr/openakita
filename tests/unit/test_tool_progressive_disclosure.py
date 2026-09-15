@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from openakita.agent import Agent
+from openakita.agent.brain import Brain
+from openakita.agent.reasoning import Decision, DecisionType, ReasoningEngine
+from openakita.core.agent_state import AgentState
 from openakita.tools.handlers.tool_search import ToolSearchHandler
 
 
@@ -42,3 +47,124 @@ async def test_tool_search_promotes_deferred_tool_for_next_main_chat_turn():
     after = Agent._stable_main_chat_tool_set(agent, tools)
     assert after[1].get("_deferred") is None
     assert after[1]["_promoted"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restrict_after_discovery", [False, True])
+async def test_discovered_list_skills_schema_reaches_next_stream_request(
+    monkeypatch, tmp_path, restrict_after_discovery
+):
+    from openakita.config import settings
+    from openakita.core.policy_v2.enums import DecisionAction
+
+    monkeypatch.setattr(settings, "project_root", tmp_path)
+    monkeypatch.setattr(settings, "supervisor_enabled", False)
+    monkeypatch.setattr(
+        "openakita.core.policy_v2.adapter.evaluate_via_v2",
+        lambda *args, **kwargs: SimpleNamespace(action=DecisionAction.ALLOW),
+    )
+    tools = [
+        {
+            "name": "tool_search",
+            "description": "Discover tools",
+            "input_schema": {"type": "object"},
+        },
+        {
+            "name": "list_skills",
+            "description": "List installed skills",
+            "input_schema": {
+                "type": "object",
+                "properties": {"category": {"type": "string"}},
+            },
+        },
+    ]
+
+    class SearchAgent:
+        _tools = tools
+
+        def __init__(self):
+            self._discovered_tools = set()
+
+        @property
+        def _effective_tools(self):
+            return Agent._stable_main_chat_tool_set(self, self._tools)
+
+    agent = SearchAgent()
+    handler = ToolSearchHandler(agent)
+
+    async def execute_tool(**kwargs):
+        return await handler.handle(kwargs["tool_name"], kwargs["tool_input"]), None
+
+    executor = SimpleNamespace(
+        _agent_ref=agent,
+        canonicalize_tool_name=lambda name: name,
+        execute_tool_with_policy=AsyncMock(side_effect=execute_tool),
+    )
+    context = Mock()
+    context.estimate_messages_tokens.return_value = 0
+    context.estimate_tools_tokens.return_value = 0
+    context.get_max_context_tokens.return_value = 0
+    context.pre_request_cleanup.side_effect = lambda messages: messages
+    context.compress_if_needed = AsyncMock(side_effect=lambda messages, **kwargs: messages)
+    context.calculate_context_pressure.return_value = SimpleNamespace(
+        messages_tokens=0,
+        system_tokens=0,
+        tools_tokens=0,
+        trigger_tokens=0,
+        soft_limit=10000,
+        hard_limit=12000,
+        max_tokens=16000,
+    )
+    brain = SimpleNamespace(model="test", get_current_endpoint_info=lambda: {})
+    engine = ReasoningEngine(
+        brain=brain,
+        tool_executor=executor,
+        context_manager=context,
+        response_handler=Mock(),
+        agent_state=AgentState(),
+    )
+    monkeypatch.setattr(engine, "_save_react_trace", Mock())
+    requests = []
+
+    class RequestsCaptured(BaseException):
+        pass
+
+    async def capture_request(messages, **kwargs):
+        # Use the real provider-schema conversion, not just the catalog names.
+        requests.append(Brain._convert_tools_to_llm(brain, kwargs["tools"]))
+        if len(requests) == (3 if restrict_after_discovery else 2):
+            raise RequestsCaptured
+        if len(requests) == 2:
+            # Model a Supervisor restriction after discovery. With no new
+            # discovery, the next iteration must keep the restricted tools.
+            kwargs["tools"].clear()
+        yield {
+            "type": "decision",
+            "decision": Decision(
+                type=DecisionType.TOOL_CALLS,
+                tool_calls=[
+                    {
+                        "id": f"search-{len(requests)}",
+                        "name": "tool_search",
+                        "input": {"query": "list_skills"},
+                    }
+                ],
+            ),
+        }
+
+    monkeypatch.setattr(engine, "_reason_stream_iter", capture_request)
+    with pytest.raises(RequestsCaptured):
+        async with asyncio.timeout(10):
+            async for _ in engine._reason_stream_impl(
+                [{"role": "user", "content": "List my installed skills"}],
+                tools=agent._effective_tools,
+            ):
+                pass
+
+    assert executor.execute_tool_with_policy.await_count >= 1
+    assert "list_skills" not in {tool.name for tool in requests[0]}
+    schemas = {tool.name: tool.input_schema for tool in requests[1]}
+    assert "list_skills" in schemas
+    assert schemas["list_skills"] == tools[1]["input_schema"]
+    if restrict_after_discovery:
+        assert requests[2] is None

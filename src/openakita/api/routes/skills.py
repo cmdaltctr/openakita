@@ -32,6 +32,8 @@ from openakita.skills.marketplace import (
     MARKETPLACE_SCHEMA_VERSION,
     SKILLHUB_PROVIDER,
     SKILLHUB_SKILLS_API,
+    installed_marketplace_names,
+    installed_marketplace_resource_id,
     normalize_skillhub_response,
 )
 
@@ -254,6 +256,19 @@ async def _build_skills_list_response(request: Request) -> dict:
         all_skills = registry.list_all()
         effective_allowlist = external_allowlist
 
+    # Read local manifests off the event loop. The list cache is invalidated by
+    # install/uninstall events, so removed resources cannot stay marked installed.
+    marketplace_names = await asyncio.to_thread(
+        installed_marketplace_names,
+        [skill.skill_path for skill in all_skills if skill.skill_path and not skill.system],
+    )
+    marketplace_ids = await asyncio.to_thread(
+        lambda: {
+            str(skill.skill_path): installed_marketplace_resource_id(skill.skill_path)
+            for skill in all_skills
+            if skill.skill_path and not skill.system
+        }
+    )
     skills = []
     for skill in all_skills:
         config = None
@@ -301,6 +316,8 @@ async def _build_skills_list_response(request: Request) -> dict:
                 "config": config,
                 "path": relative_path,
                 "source_url": getattr(skill, "source_url", None),
+                "marketplace_resource_id": marketplace_ids.get(str(skill.skill_path)),
+                "marketplace_name": marketplace_names.get(str(skill.skill_path)),
                 "runtime_state": {
                     "installed": bool(runtime_state.get("installed", True)),
                     "enabled": is_enabled,

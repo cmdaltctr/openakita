@@ -31,6 +31,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def skill_catalog_name(skill: object) -> str:
+    """Keep the human-facing marketplace name paired with its callable ID."""
+    name = str(getattr(skill, "name", "") or getattr(skill, "skill_id", "skill"))
+    official = getattr(skill, "marketplace_name", None)
+    if isinstance(official, str) and official:
+        sid = str(getattr(skill, "skill_id", "") or name)
+        return f"{official} ({sid})"
+    return name
+
 DEFAULT_SKILL_METADATA_TOKEN_BUDGET = 800
 MAX_SKILL_METADATA_TOKEN_BUDGET = 1_000
 SKILL_METADATA_CONTEXT_WINDOW_PERCENT = 2
@@ -179,7 +189,7 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
             if not skills:
                 result = "No skills installed."
             else:
-                names = [s.name for s in skills]
+                names = [skill_catalog_name(s) for s in skills]
                 result = f"Available skills: {', '.join(names)}"
             self._cached_compact = result
             return result
@@ -276,7 +286,7 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
             ]
 
             def render_entry(skill: object, description_limit: int) -> str:
-                name = str(getattr(skill, "name", "") or getattr(skill, "skill_id", "skill"))
+                name = skill_catalog_name(skill)
                 description = " ".join(str(getattr(skill, "description", "") or "").split())
                 if description_limit <= 0:
                     description = ""
@@ -425,7 +435,7 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
                         lines.append(
                             self._safe_format(
                                 "- **{name}**: {when}",
-                                name=s.name,
+                                name=skill_catalog_name(s),
                                 when=when,
                             )
                         )
@@ -447,7 +457,7 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
                     "",
                 ]
                 for cat in sorted_cats:
-                    names = [s.name for s in grouped[cat]]
+                    names = [skill_catalog_name(s) for s in grouped[cat]]
                     desc = cat_descriptions.get(cat)
                     lines.append(f"### {cat} — {desc}" if desc else f"### {cat}")
                     lines.append(", ".join(names))
@@ -486,14 +496,14 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
                             lines.append(
                                 self._safe_format(
                                     "- **{name}**: {when}",
-                                    name=s.name,
+                                    name=skill_catalog_name(s),
                                     when=when,
                                 )
                             )
                         lines.append("")
                     else:
                         # Level C 仅名字 — 用 (index) 后缀提示
-                        names = [s.name for s in grouped[cat]]
+                        names = [skill_catalog_name(s) for s in grouped[cat]]
                         title = f"### {cat} (index) — {desc}" if desc else f"### {cat} (index)"
                         lines.append(title)
                         lines.append(", ".join(names))
@@ -563,12 +573,12 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
 
             for s in skills:
                 if getattr(s, "system", False):
-                    system_names.append(s.name)
+                    system_names.append(skill_catalog_name(s))
                 elif getattr(s, "plugin_source", None):
                     plugin_id = s.plugin_source.replace("plugin:", "")
-                    plugin_entries.append(f"{s.name} (via {plugin_id})")
+                    plugin_entries.append(f"{skill_catalog_name(s)} (via {plugin_id})")
                 else:
-                    external_names.append(s.name)
+                    external_names.append(skill_catalog_name(s))
 
             system_names.sort()
             external_names.sort()
@@ -627,16 +637,16 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
             for s in skills:
                 hint = getattr(s, "when_to_use", "") or ""
                 if hint:
-                    b_lines.append(f"- **{s.name}**: {hint[:60]}")
+                    b_lines.append(f"- **{skill_catalog_name(s)}**: {hint[:60]}")
                 else:
                     desc_short = (s.description or "")[:40]
-                    b_lines.append(f"- **{s.name}**: {desc_short}")
+                    b_lines.append(f"- **{skill_catalog_name(s)}**: {desc_short}")
             level_b = "\n".join(b_lines)
             if len(level_b) <= budget_chars:
                 return level_b
 
             # Level C: names only
-            names = [s.name for s in skills]
+            names = [skill_catalog_name(s) for s in skills]
             return f"Skills ({len(skills)}): {', '.join(names)}"
 
     def get_skill_summary(self, skill_name: str) -> str | None:
@@ -644,7 +654,7 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
         skill = self.registry.get(skill_name)
         if not skill:
             return None
-        return f"**{skill.name}**: {skill.description}"
+        return f"**{skill_catalog_name(skill)}**: {skill.description}"
 
     def generate_recommendation_hint(
         self,
@@ -684,6 +694,9 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
                 continue
 
             score = 0.0
+            official = getattr(s, "marketplace_name", None)
+            if isinstance(official, str) and official and official.lower() in query_lower:
+                score += 10.0
             when = getattr(s, "when_to_use", "") or ""
             kws = getattr(s, "keywords", []) or []
 
@@ -698,7 +711,7 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
 
             if score > 0:
                 short_desc = (s.description or "")[:40]
-                candidates.append((score, s.name, short_desc))
+                candidates.append((score, skill_catalog_name(s), short_desc))
 
         if not candidates:
             return ""
@@ -793,6 +806,8 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
         current = self._build_manifest()
         if current != snap_manifest:
             return None
+        if data.get("marketplace_names", {}) != self._marketplace_name_snapshot():
+            return None
         result: dict[tuple, str] = {}
         for k, v in snap_catalogs.items():
             if not isinstance(v, str):
@@ -816,7 +831,10 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
         for (exposure, mt), v in self._cached_grouped.items():
             if mt == 0:
                 catalogs[exposure if exposure is not None else ""] = v
-        payload = {"version": 1, "manifest": manifest, "catalogs": catalogs}
+        payload = {
+            "version": 1, "manifest": manifest, "catalogs": catalogs,
+            "marketplace_names": self._marketplace_name_snapshot(),
+        }
 
         try:
             tmp_fd, tmp_str = tempfile.mkstemp(
@@ -833,6 +851,12 @@ Do not infer filesystem paths from the workspace map; `get_skill_info` is author
                     tmp_path.unlink()
             except OSError:
                 pass
+
+    def _marketplace_name_snapshot(self) -> dict[str, str]:
+        return {
+            entry.skill_id: entry.marketplace_name for entry in self.registry.list_all()
+            if isinstance(getattr(entry, "marketplace_name", None), str) and entry.marketplace_name
+        }
 
     def _invalidate_disk_snapshot(self) -> None:
         """清空磁盘 snapshot 与 ``_snapshot_loaded`` 标记。"""
