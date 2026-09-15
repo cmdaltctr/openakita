@@ -66,7 +66,7 @@ it("continues permission setup inside the completed marketplace install and refr
     }
     return fetchPlugin(url, init);
   });
-  render(<><PluginManagerView visible httpApiBase={() => base} /><MarketplaceInstallDialog apiBaseUrl={base} desktopVersion="1.27.40" /></>);
+  render(<><PluginManagerView visible httpApiBase={() => base} desktopVersion="1.27.40" /><MarketplaceInstallDialog apiBaseUrl={base} desktopVersion="1.27.40" /></>);
   fireEvent.click(await screen.findByRole("button", { name: "确认安装" }));
   expect((await screen.findAllByText("Word Maker")).length).toBeGreaterThan(0);
   const grant = await screen.findByRole("button", { name: "授权并继续" });
@@ -142,7 +142,7 @@ it("automatically refreshes a visible plugin page after an installation in anoth
   installed = false;
   vi.useFakeTimers();
   try {
-    const view = render(<PluginManagerView visible httpApiBase={() => base} />);
+    const view = render(<PluginManagerView visible httpApiBase={() => base} desktopVersion="1.27.40" />);
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(screen.queryByText("Word Maker")).not.toBeInTheDocument();
     installed = true;
