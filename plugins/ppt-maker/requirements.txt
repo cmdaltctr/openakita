@@ -1,9 +1,0 @@
-# Runtime dependencies, including the shipped document, table and chart features.
-python-pptx>=1.0.0
-markdown-it-py>=3.0.0
-Pillow>=10.0.0
-python-docx
-pypdf
-beautifulsoup4
-openpyxl
-matplotlib
