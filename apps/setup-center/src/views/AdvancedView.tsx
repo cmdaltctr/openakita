@@ -120,6 +120,7 @@ export function AdvancedView(props: AdvancedViewProps) {
   // ── Local state (previously in App.tsx top-level, only used here) ──
   const [advSysInfo, setAdvSysInfo] = useState<Record<string, string> | null>(null);
   const [advLoading, setAdvLoading] = useState<Record<string, boolean>>({});
+  const [diagExporting, setDiagExporting] = useState(false);
   const [hubApiUrl, setHubApiUrl] = useState<string>("");
 
   const [backupHistory, setBackupHistory] = useState<Array<{ filename: string; path: string; size_bytes: number; created_at: string; manifest?: any }>>([]);
@@ -230,11 +231,31 @@ export function AdvancedView(props: AdvancedViewProps) {
   }
 
   async function opsHandleBundleExport() {
-    if (!currentWorkspaceId) return;
+    if (diagExporting || (IS_TAURI && !currentWorkspaceId)) return;
+    setDiagExporting(true);
     let _b: string | number | undefined;
     try {
       const ts = Math.floor(Date.now() / 1000);
       const filename = `openakita-diagnostic-${ts}.zip`;
+      if (!IS_TAURI) {
+        _b = notifyLoading(t("adv.opsLogExporting"));
+        const res = await safeFetch(`${httpApiBase()}/api/diagnostics/export`, {
+          signal: AbortSignal.timeout(120_000),
+        });
+        const url = URL.createObjectURL(await res.blob());
+        const link = document.createElement("a");
+        try {
+          link.href = url;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+        } finally {
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        }
+        notifySuccess(t("adv.opsLogDownloadStarted"));
+        return;
+      }
       const defaultDir = info?.homeDir ? joinPath(info.homeDir, "Downloads") : undefined;
       const chosen = await saveFileDialog({
         defaultPath: defaultDir ? joinPath(defaultDir, filename) : filename,
@@ -257,7 +278,10 @@ export function AdvancedView(props: AdvancedViewProps) {
       });
       notifySuccess(t("adv.opsLogExportSuccess", { path: dest }));
       await invoke("show_item_in_folder", { path: dest });
-    } catch (e) { notifyError(String(e)); } finally { if (_b !== undefined) dismissLoading(_b); }
+    } catch (e) { notifyError(String(e)); } finally {
+      if (_b !== undefined) dismissLoading(_b);
+      setDiagExporting(false);
+    }
   }
 
   // ── Backup ──
@@ -953,11 +977,11 @@ export function AdvancedView(props: AdvancedViewProps) {
         <h3 style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{t("adv.sysOpsTitle")}</h3>
 
         <Section title={t("adv.sysTitle")}
-          toggle={IS_TAURI ? (
-            <Button variant="outline" size="xs" onClick={(e) => { e.preventDefault(); opsHandleBundleExport(); }} disabled={!!busy || !currentWorkspaceId}>
-              {busy === t("adv.opsLogExporting") ? t("adv.opsLogExporting") : t("adv.exportDiagBtn")}
+          toggle={(
+            <Button variant="outline" size="xs" onClick={(e) => { e.preventDefault(); opsHandleBundleExport(); }} disabled={!!busy || diagExporting || (IS_TAURI ? !currentWorkspaceId : !serviceStatus?.running)}>
+              {diagExporting ? t("adv.opsLogExporting") : t("adv.exportDiagBtn")}
             </Button>
-          ) : undefined}
+          )}
         >
           {!advSysInfo ? (
             advLoading.sysinfo ? (
