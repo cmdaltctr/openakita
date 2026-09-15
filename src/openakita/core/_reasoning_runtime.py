@@ -2198,7 +2198,9 @@ class ReasoningEngine:
                     if _current_discovered != _last_discovered_snapshot:
                         _last_discovered_snapshot = _current_discovered
                         refreshed = _filter_tools_by_mode(_agent._effective_tools, _effective_mode)
-                        if {t.get("name") for t in refreshed} != {t.get("name") for t in tools}:
+                        # Discovery changes schema visibility (_deferred), not
+                        # necessarily tool names: deferred tools remain in both lists.
+                        if refreshed != tools:
                             tools = refreshed
                             _allowed_tool_names = (
                                 {t.get("name", "") for t in tools}
