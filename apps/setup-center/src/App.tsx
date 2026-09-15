@@ -4759,7 +4759,7 @@ function MainApp() {
       );
     }
     if (view === "plugins") {
-      return <PluginManagerView visible={true} httpApiBase={httpApiBase} />;
+      return <PluginManagerView visible={true} httpApiBase={httpApiBase} desktopVersion={desktopVersion} />;
     }
     if (view === "knowledge") {
       return <KnowledgeBaseView serviceRunning={serviceStatus?.running ?? false} apiBaseUrl={httpApiBase()} />;

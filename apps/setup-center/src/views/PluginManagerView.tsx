@@ -7,6 +7,10 @@ import remarkGfm from "remark-gfm";
 import { safeFetch } from "../providers";
 import { showInFolder, downloadFile, openFileDialog } from "../platform";
 import { IconCode, IconPlug, IconFileText2, IconPackage, IconBook, IconGear, IconShield, IconFolderOpen, IconDownload, IconTerminal, IconHeartPulse, IconRefresh } from "../icons";
+import { ChevronDown, Store } from "lucide-react";
+import { marketplaceOpenErrorKey, openMarketplaceWithAccount } from "../marketplace/open";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "../components/ui/dialog";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "../components/ui/dropdown-menu";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
@@ -208,10 +212,11 @@ function PluginIcon({ plugin, apiBase }: { plugin: PluginInfo; apiBase: string }
 
 interface Props {
   visible: boolean;
+  desktopVersion: string;
   httpApiBase: () => string;
 }
 
-export default function PluginManagerView({ visible, httpApiBase }: Props) {
+export default function PluginManagerView({ visible, httpApiBase, desktopVersion }: Props) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
@@ -221,6 +226,10 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
   const [notAvailable, setNotAvailable] = useState(false);
   const [installUrl, setInstallUrl] = useState("");
   const [installing, setInstalling] = useState(false);
+  const [installDialogOpen, setInstallDialogOpen] = useState(false);
+  const [installError, setInstallError] = useState("");
+  const [marketplaceOpening, setMarketplaceOpening] = useState(false);
+  const installMenuRef = useRef<HTMLButtonElement>(null);
   const [installConfirmOpen, setInstallConfirmOpen] = useState(false);
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -542,6 +551,18 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
     }
   };
 
+  const openMarketplace = async () => {
+    if (marketplaceOpening) return;
+    setMarketplaceOpening(true);
+    try {
+      await openMarketplaceWithAccount(desktopVersion, apiBaseRef.current(), "/catalog?type=plugin");
+    } catch (e) {
+      showToast(t(marketplaceOpenErrorKey(e)), "err");
+    } finally {
+      setMarketplaceOpening(false);
+    }
+  };
+
   const requestInstall = () => {
     if (!installUrl.trim()) return;
     setInstallConfirmOpen(true);
@@ -564,7 +585,7 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
     if (!source) return;
     setInstallConfirmOpen(false);
     setInstalling(true);
-    setError("");
+    setInstallError("");
     try {
       const response = await safeFetch(`${apiBaseRef.current()}/api/plugins/install`, {
         method: "POST",
@@ -578,6 +599,7 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
       );
       if (failure) throw new Error(failure);
       setInstallUrl("");
+      setInstallDialogOpen(false);
       showToast(
         applyNotice ? `${t("plugins.toastInstalled")}: ${applyNotice}` : t("plugins.toastInstalled"),
         applyNotice ? "warn" : "ok",
@@ -586,12 +608,12 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
       notifyAppsChanged();
     } catch (e: any) {
       if (isTimeoutError(e)) {
-        showToast(t("plugins.toastOpStillRunning"), "err");
+        setInstallError(t("plugins.toastOpStillRunning"));
         await fetchPlugins(false);
         notifyAppsChanged();
       } else {
         showToast(e.message, "err");
-        setError(e.message);
+        setInstallError(e.message);
       }
     } finally {
       setInstalling(false);
@@ -793,7 +815,7 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-6 py-5">
       <Card className="gap-0 overflow-hidden border-border/80 bg-gradient-to-br from-primary/5 via-background to-background py-0 shadow-sm">
         <CardHeader className="gap-3 px-6 py-5">
-          <div className="flex items-start justify-between gap-4">
+          <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-4">
               <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary">
                 <IconPlug size={24} />
@@ -816,6 +838,27 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
                 </CardDescription>
               </div>
             </div>
+            <div className="flex shrink-0 items-center">
+              <Button className="rounded-r-none" onClick={openMarketplace} disabled={marketplaceOpening}>
+                <Store size={16} />{t("plugins.goToMarketplace")}
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button ref={installMenuRef} size="icon" className="rounded-l-none border-l border-primary-foreground/30"
+                    aria-label={t("plugins.otherInstallMethods")}>
+                    <ChevronDown size={16} />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem disabled={notAvailable} onSelect={() => {
+                    setInstallError("");
+                    setInstallDialogOpen(true);
+                  }}>
+                    <IconFolderOpen size={16} />{t("plugins.manualInstall")}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="grid gap-3 border-t px-6 py-4 sm:grid-cols-3">
@@ -834,21 +877,25 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
         </CardContent>
       </Card>
 
-      <Card className="gap-0 border-border/80 py-0 shadow-sm">
-        <CardHeader className="gap-2 px-6 py-4">
-          <CardTitle className="text-base">{t("plugins.install")}</CardTitle>
-          <CardDescription>{t("plugins.installPlaceholder")}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4 px-6 py-4">
-          <div className="flex flex-col gap-3 lg:flex-row">
+      <Dialog open={installDialogOpen} onOpenChange={(open) => {
+        if (!installing) setInstallDialogOpen(open);
+      }}>
+        <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-xl" showCloseButton={!installing}
+          onCloseAutoFocus={(event) => { event.preventDefault(); installMenuRef.current?.focus(); }}>
+          <DialogHeader>
+            <DialogTitle>{t("plugins.installTitle")}</DialogTitle>
+            <DialogDescription>{t("plugins.manualInstallDesc")}</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 sm:flex-row">
             <div className="relative flex-1">
               <Input
+                aria-label={t("plugins.installPlaceholder")}
                 type="text"
                 placeholder={t("plugins.installPlaceholder")}
                 value={installUrl}
                 onChange={(e) => setInstallUrl(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && !installBtnDisabled && requestInstall()}
-                disabled={notAvailable}
+                disabled={notAvailable || installing}
                 className="pr-11"
               />
               <Button
@@ -868,9 +915,6 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
               <Button onClick={requestInstall} disabled={installBtnDisabled}>
                 {installing ? t("plugins.installing") : t("plugins.install")}
               </Button>
-              <Button variant="outline" onClick={() => fetchPlugins(false)}>
-                {t("plugins.refresh")}
-              </Button>
             </div>
           </div>
 
@@ -884,7 +928,7 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
               <Checkbox
                 checked={devMode === "symlink"}
                 onCheckedChange={(v) => toggleDevMode(Boolean(v))}
-                disabled={devModeSaving}
+                disabled={devModeSaving || installing}
                 className="mt-0.5"
               />
               <div className="min-w-0 space-y-1">
@@ -904,38 +948,9 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
             </label>
           )}
 
-          {!notAvailable && plugins.length > 0 && (
-            <div className="rounded-xl border bg-muted/20 p-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div className="text-sm font-medium text-foreground">{categoryLabel(categoryFilter, lang)}</div>
-                <div className="text-xs text-muted-foreground">
-                  {t("plugins.installed", { count: filteredPlugins.length })}
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {categoryTabs.map((cat) => {
-                  const active = categoryFilter === cat;
-                  const count = cat === "all"
-                    ? plugins.length
-                    : plugins.filter((p) => (p.category || p.type || "tool") === cat).length;
-                  return (
-                    <Button
-                      key={cat}
-                      size="sm"
-                      variant={active ? "default" : "outline"}
-                      className="rounded-full px-4"
-                      onClick={() => setCategoryFilter(cat)}
-                    >
-                      {categoryLabel(cat, lang)}
-                      <span className="ml-1 opacity-70">{count}</span>
-                    </Button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+          {installError && <p role="alert" className="text-sm text-destructive">{installError}</p>}
+        </DialogContent>
+      </Dialog>
 
       {notAvailable && (
         <Card className="border-amber-500/40 bg-amber-500/5 shadow-sm">
@@ -990,6 +1005,47 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
         </Card>
       )}
 
+      {!notAvailable && (
+        <section className="space-y-3" aria-label={t("plugins.installedTitle")}>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">{t("plugins.installedTitle")} · {plugins.length}</h2>
+            <Button variant="outline" onClick={() => fetchPlugins(false)} disabled={loading}>
+              <IconRefresh size={16} />{t("plugins.refresh")}
+            </Button>
+          </div>
+          {!notAvailable && plugins.length > 0 && (
+            <div className="rounded-xl border bg-muted/20 p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="text-sm font-medium text-foreground">{categoryLabel(categoryFilter, lang)}</div>
+                <div className="text-xs text-muted-foreground">
+                  {t("plugins.installed", { count: filteredPlugins.length })}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {categoryTabs.map((cat) => {
+                  const active = categoryFilter === cat;
+                  const count = cat === "all"
+                    ? plugins.length
+                    : plugins.filter((p) => (p.category || p.type || "tool") === cat).length;
+                  return (
+                    <Button
+                      key={cat}
+                      size="sm"
+                      variant={active ? "default" : "outline"}
+                      className="rounded-full px-4"
+                      onClick={() => setCategoryFilter(cat)}
+                    >
+                      {categoryLabel(cat, lang)}
+                      <span className="ml-1 opacity-70">{count}</span>
+                    </Button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
       {loading && !notAvailable ? (
         <Card className="shadow-sm">
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
@@ -999,7 +1055,7 @@ export default function PluginManagerView({ visible, httpApiBase }: Props) {
       ) : !notAvailable && filteredPlugins.length === 0 && failedEntries.length === 0 ? (
         <Card className="shadow-sm">
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            {t("plugins.noPlugins")}
+            {t(plugins.length > 0 ? "plugins.noCategoryPlugins" : "plugins.noPlugins")}
           </CardContent>
         </Card>
       ) : !notAvailable ? (
