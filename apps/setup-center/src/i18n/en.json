@@ -2561,6 +2561,7 @@
     "exportDiagBtn": "Export Diagnostics",
     "opsLogExporting": "Bundling...",
     "opsLogExportSuccess": "Diagnostic bundle exported to: {{path}}",
+    "opsLogDownloadStarted": "Diagnostic download started. Check your browser's downloads.",
     "factoryResetTitle": "Factory Reset",
     "factoryResetSubtitle": "Erase all config and data, restore to fresh install state",
     "factoryResetDesc": "This will stop all backend processes, then delete all workspaces, conversations, memory data, runtime environment, logs, and configuration files. After reset, the initial setup wizard will launch. This action is irreversible.",

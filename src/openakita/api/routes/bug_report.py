@@ -18,7 +18,7 @@ import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -679,6 +679,35 @@ async def get_system_info():
     return _collect_system_info()
 
 
+def _build_diagnostic_zip() -> bytes:
+    """Build a local download without creating or uploading a feedback report."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "system_info.json", json.dumps(_collect_system_info(), ensure_ascii=False, indent=2)
+        )
+        _add_diagnostic_files(zf, upload_logs=True, upload_debug=True)
+    payload = buf.getvalue()
+    if len(payload) > MAX_ZIP_SIZE:
+        raise HTTPException(status_code=413, detail="Diagnostic package exceeds the 30 MB limit")
+    return payload
+
+
+@router.get("/api/diagnostics/export")
+async def export_diagnostics():
+    """Download diagnostics from the running backend's workspace."""
+    payload = await asyncio.to_thread(_build_diagnostic_zip)
+    filename = f"openakita-diagnostic-{int(time.time())}.zip"
+    return Response(
+        payload,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @router.get("/api/feedback-config")
 async def get_feedback_config():
     """Return public-facing feedback configuration (CAPTCHA identifiers etc.).
@@ -981,6 +1010,168 @@ async def _pack_images(zf: zipfile.ZipFile, images: list[UploadFile] | None) -> 
         zf.writestr(f"images/{i:02d}_{img.filename or f'image{ext}'}", content)
 
 
+def _add_diagnostic_files(zf: zipfile.ZipFile, *, upload_logs: bool, upload_debug: bool) -> None:
+    """Collect the same local diagnostic files for feedback and direct exports."""
+    if upload_logs:
+        try:
+            from openakita.config import settings
+
+            main_log = settings.log_file_path
+            error_log = settings.error_log_path
+            logs_dir = settings.log_dir_path
+        except Exception:
+            logs_dir = Path.cwd() / "logs"
+            main_log = logs_dir / "openakita.log"
+            error_log = logs_dir / "error.log"
+
+        log_data = _tail_file(main_log, LOG_TAIL_BYTES)
+        if log_data:
+            zf.writestr("logs/openakita.log", log_data)
+        err_data = _tail_file(error_log, LOG_TAIL_BYTES)
+        if err_data:
+            zf.writestr("logs/error.log", err_data)
+        serve_data = _tail_file(logs_dir / "openakita-serve.log", LOG_TAIL_BYTES)
+        if serve_data:
+            zf.writestr("logs/openakita-serve.log", serve_data)
+
+        global_logs = _resolve_global_logs_dir()
+        fe_data = _tail_file(global_logs / "frontend.log", FRONTEND_LOG_TAIL_BYTES)
+        if fe_data:
+            zf.writestr("logs/frontend.log", fe_data)
+        crash_data = _tail_file(global_logs / "crash.log", FRONTEND_LOG_TAIL_BYTES)
+        if crash_data:
+            zf.writestr("logs/crash.log", crash_data)
+
+        # Runtime creation happens in the Tauri shell before the Python
+        # backend starts. These files are therefore the primary evidence
+        # when an upgrade cannot rebuild app-venv and the normal backend
+        # logs never receive the failure.
+        autostart_data = _tail_file(global_logs / "autostart.log", LOG_TAIL_BYTES)
+        if autostart_data:
+            zf.writestr("global_logs/autostart.log", autostart_data)
+
+        runtime_dir = _resolve_openakita_home_dir() / "runtime"
+        _add_file(zf, runtime_dir / "manifest.json", "runtime/manifest.json")
+        for runtime_log_name in ("app-venv.log", "agent-venv.log", "bootstrap.log"):
+            runtime_log_data = _tail_file(
+                runtime_dir / "logs" / runtime_log_name,
+                LOG_TAIL_BYTES,
+            )
+            if runtime_log_data:
+                zf.writestr(f"runtime/logs/{runtime_log_name}", runtime_log_data)
+
+        data_dir = _resolve_data_dir()
+        _add_dir_recent(
+            zf,
+            data_dir / "delegation_logs",
+            "delegation_logs",
+            patterns=("*.jsonl",),
+            max_total_bytes=2 * 1024 * 1024,
+        )
+
+    if upload_debug:
+        data_dir = _resolve_data_dir()
+        for df in _get_recent_llm_debug_files(50):
+            try:
+                zf.write(df, f"llm_debug/{df.name}")
+            except Exception:
+                pass
+        _add_dir_recent(
+            zf,
+            data_dir / "react_traces",
+            "react_traces",
+            patterns=("*.json",),
+            max_total_bytes=5 * 1024 * 1024,
+        )
+        _add_dir_recent(
+            zf,
+            data_dir / "traces",
+            "traces",
+            patterns=("*.json",),
+            max_total_bytes=2 * 1024 * 1024,
+        )
+        _add_dir_recent(
+            zf,
+            data_dir / "orgs",
+            "orgs",
+            patterns=("*.jsonl", "*.json", "*.md"),
+            max_total_bytes=2 * 1024 * 1024,
+        )
+        _add_dir_recent(
+            zf,
+            data_dir / "tool_overflow",
+            "tool_overflow",
+            patterns=("*.txt",),
+            max_total_bytes=2 * 1024 * 1024,
+        )
+        _add_dir_recent(
+            zf,
+            data_dir / "failure_analysis",
+            "failure_analysis",
+            max_total_bytes=1 * 1024 * 1024,
+        )
+        _add_dir_recent(
+            zf,
+            data_dir / "retrospects",
+            "retrospects",
+            patterns=("*.jsonl",),
+            max_total_bytes=1 * 1024 * 1024,
+        )
+        # Runtime state contains bot credentials; use the same redacted snapshot
+        # as sanitized_config.json instead of also including the original file.
+        _add_file(
+            zf,
+            data_dir / "sub_agent_states.json",
+            "state/sub_agent_states.json",
+        )
+        _add_file(
+            zf,
+            data_dir / "backend.heartbeat",
+            "state/backend.heartbeat",
+        )
+        _add_file(
+            zf,
+            data_dir / "sessions" / "sessions.json",
+            "state/sessions.json",
+        )
+        _add_file(
+            zf,
+            data_dir / "sessions" / "channel_registry.json",
+            "state/channel_registry.json",
+        )
+        _add_file(
+            zf,
+            data_dir / "scheduler" / "tasks.json",
+            "state/scheduler_tasks.json",
+        )
+        _add_file(
+            zf,
+            data_dir / "scheduler" / "executions.json",
+            "state/scheduler_executions.json",
+        )
+        try:
+            config_snapshot = _collect_sanitized_config()
+            if config_snapshot:
+                if "_runtime_state" in config_snapshot:
+                    zf.writestr(
+                        "state/runtime_state.json",
+                        json.dumps(config_snapshot["_runtime_state"], ensure_ascii=False, indent=2),
+                    )
+                zf.writestr(
+                    "state/sanitized_config.json",
+                    json.dumps(config_snapshot, ensure_ascii=False, indent=2),
+                )
+        except Exception:
+            pass
+
+    # Always include native desktop crash evidence for bug reports when
+    # available. This intentionally does not depend on the upload_logs /
+    # upload_debug checkboxes: users submit these reports after a crash,
+    # and the minidump/WER files are the only reliable evidence for
+    # WebView2/Tauri native failures.
+    _add_windows_crash_artifacts(zf)
+
+
 async def _build_bug_zip(
     *,
     report_id: str,
@@ -1018,162 +1209,7 @@ async def _build_bug_zip(
 
         await _pack_images(zf, images)
 
-        if upload_logs:
-            try:
-                from openakita.config import settings
-
-                main_log = settings.log_file_path
-                error_log = settings.error_log_path
-                logs_dir = settings.log_dir_path
-            except Exception:
-                logs_dir = Path.cwd() / "logs"
-                main_log = logs_dir / "openakita.log"
-                error_log = logs_dir / "error.log"
-
-            log_data = _tail_file(main_log, LOG_TAIL_BYTES)
-            if log_data:
-                zf.writestr("logs/openakita.log", log_data)
-            err_data = _tail_file(error_log, LOG_TAIL_BYTES)
-            if err_data:
-                zf.writestr("logs/error.log", err_data)
-            serve_data = _tail_file(logs_dir / "openakita-serve.log", LOG_TAIL_BYTES)
-            if serve_data:
-                zf.writestr("logs/openakita-serve.log", serve_data)
-
-            global_logs = _resolve_global_logs_dir()
-            fe_data = _tail_file(global_logs / "frontend.log", FRONTEND_LOG_TAIL_BYTES)
-            if fe_data:
-                zf.writestr("logs/frontend.log", fe_data)
-            crash_data = _tail_file(global_logs / "crash.log", FRONTEND_LOG_TAIL_BYTES)
-            if crash_data:
-                zf.writestr("logs/crash.log", crash_data)
-
-            # Runtime creation happens in the Tauri shell before the Python
-            # backend starts. These files are therefore the primary evidence
-            # when an upgrade cannot rebuild app-venv and the normal backend
-            # logs never receive the failure.
-            autostart_data = _tail_file(global_logs / "autostart.log", LOG_TAIL_BYTES)
-            if autostart_data:
-                zf.writestr("global_logs/autostart.log", autostart_data)
-
-            runtime_dir = _resolve_openakita_home_dir() / "runtime"
-            _add_file(zf, runtime_dir / "manifest.json", "runtime/manifest.json")
-            for runtime_log_name in ("app-venv.log", "agent-venv.log", "bootstrap.log"):
-                runtime_log_data = _tail_file(
-                    runtime_dir / "logs" / runtime_log_name,
-                    LOG_TAIL_BYTES,
-                )
-                if runtime_log_data:
-                    zf.writestr(f"runtime/logs/{runtime_log_name}", runtime_log_data)
-
-            data_dir = _resolve_data_dir()
-            _add_dir_recent(
-                zf,
-                data_dir / "delegation_logs",
-                "delegation_logs",
-                patterns=("*.jsonl",),
-                max_total_bytes=2 * 1024 * 1024,
-            )
-
-        if upload_debug:
-            data_dir = _resolve_data_dir()
-            for df in _get_recent_llm_debug_files(50):
-                try:
-                    zf.write(df, f"llm_debug/{df.name}")
-                except Exception:
-                    pass
-            _add_dir_recent(
-                zf,
-                data_dir / "react_traces",
-                "react_traces",
-                patterns=("*.json",),
-                max_total_bytes=5 * 1024 * 1024,
-            )
-            _add_dir_recent(
-                zf,
-                data_dir / "traces",
-                "traces",
-                patterns=("*.json",),
-                max_total_bytes=2 * 1024 * 1024,
-            )
-            _add_dir_recent(
-                zf,
-                data_dir / "orgs",
-                "orgs",
-                patterns=("*.jsonl", "*.json", "*.md"),
-                max_total_bytes=2 * 1024 * 1024,
-            )
-            _add_dir_recent(
-                zf,
-                data_dir / "tool_overflow",
-                "tool_overflow",
-                patterns=("*.txt",),
-                max_total_bytes=2 * 1024 * 1024,
-            )
-            _add_dir_recent(
-                zf,
-                data_dir / "failure_analysis",
-                "failure_analysis",
-                max_total_bytes=1 * 1024 * 1024,
-            )
-            _add_dir_recent(
-                zf,
-                data_dir / "retrospects",
-                "retrospects",
-                patterns=("*.jsonl",),
-                max_total_bytes=1 * 1024 * 1024,
-            )
-            _add_file(
-                zf,
-                data_dir / "runtime_state.json",
-                "state/runtime_state.json",
-            )
-            _add_file(
-                zf,
-                data_dir / "sub_agent_states.json",
-                "state/sub_agent_states.json",
-            )
-            _add_file(
-                zf,
-                data_dir / "backend.heartbeat",
-                "state/backend.heartbeat",
-            )
-            _add_file(
-                zf,
-                data_dir / "sessions" / "sessions.json",
-                "state/sessions.json",
-            )
-            _add_file(
-                zf,
-                data_dir / "sessions" / "channel_registry.json",
-                "state/channel_registry.json",
-            )
-            _add_file(
-                zf,
-                data_dir / "scheduler" / "tasks.json",
-                "state/scheduler_tasks.json",
-            )
-            _add_file(
-                zf,
-                data_dir / "scheduler" / "executions.json",
-                "state/scheduler_executions.json",
-            )
-            try:
-                config_snapshot = _collect_sanitized_config()
-                if config_snapshot:
-                    zf.writestr(
-                        "state/sanitized_config.json",
-                        json.dumps(config_snapshot, ensure_ascii=False, indent=2),
-                    )
-            except Exception:
-                pass
-
-        # Always include native desktop crash evidence for bug reports when
-        # available. This intentionally does not depend on the upload_logs /
-        # upload_debug checkboxes: users submit these reports after a crash,
-        # and the minidump/WER files are the only reliable evidence for
-        # WebView2/Tauri native failures.
-        _add_windows_crash_artifacts(zf)
+        _add_diagnostic_files(zf, upload_logs=upload_logs, upload_debug=upload_debug)
 
     return buf.getvalue()
 
