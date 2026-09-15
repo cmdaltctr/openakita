@@ -1007,6 +1007,11 @@ def list_skills(workspace_dir: str) -> None:
     loader = SkillLoader()
     loader.load_all(base_path=wd)
     skills = loader.registry.list_all()
+    from openakita.skills.marketplace import installed_marketplace_names
+
+    marketplace_names = installed_marketplace_names(
+        [s.skill_path for s in skills if s.skill_path and not s.system]
+    )
     out = []
     for s in skills:
         skill_path = getattr(s, "skill_path", None)
@@ -1035,6 +1040,7 @@ def list_skills(workspace_dir: str) -> None:
                 "category": getattr(s, "category", None),
                 "path": skill_path,
                 "source_url": source_url,
+                "marketplace_name": marketplace_names.get(str(skill_path)),
                 "config": getattr(s, "config", None) or getattr(s, "config_schema", None),
             }
         )

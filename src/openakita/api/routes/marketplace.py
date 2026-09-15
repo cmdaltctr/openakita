@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+import os
+from typing import Literal
+
+import httpx
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from openakita.account.desktop import require_marketplace_access, trusted_marketplace_origin
@@ -11,6 +15,62 @@ from openakita.integrations.marketplace import MarketplaceInstallManager
 from openakita.integrations.marketplace.installer import MarketplaceInstallError
 
 router = APIRouter(prefix="/api/marketplace", tags=["marketplace"])
+
+
+@router.get("/skills")
+async def list_marketplace_skills(
+    q: str = Query(default="", max_length=300),
+    category: str = Query(default="", max_length=100),
+    sort: Literal["popular", "new", "acquired"] = "popular",
+    limit: int = Query(default=24, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    """Read the public catalog without forwarding local credentials or granting acquisition."""
+    origin = trusted_marketplace_origin(
+        os.environ.get("OPENAKITA_MARKETPLACE_URL", "https://marketplace.openakita.cn")
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+            response = await client.get(
+                f"{origin}/api/v1/resources",
+                params={
+                    "type": "skill",
+                    "q": q,
+                    "category": category,
+                    "sort": sort,
+                    "limit": limit,
+                    "offset": offset,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("items"), list)
+            or not isinstance(data.get("total"), int)
+            or data["total"] < 0
+            or any(
+                not isinstance(item, dict)
+                or item.get("resource_type") != "skill"
+                or not all(
+                    isinstance(item.get(key), str) and item[key] for key in ("id", "slug", "name")
+                )
+                for item in data["items"]
+            )
+        ):
+            raise ValueError("Invalid marketplace catalog")
+        return {
+            "items": data["items"],
+            "total": data["total"],
+            "limit": limit,
+            "offset": offset,
+            "facets": data.get("facets", {}),
+            "origin": origin,
+        }
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502, detail={"code": "marketplace_catalog_unavailable"}
+        ) from exc
 
 
 class PrepareBody(BaseModel):

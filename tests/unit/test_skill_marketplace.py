@@ -1,14 +1,92 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from openakita.skills.marketplace import (
+    MARKETPLACE_INSTALL_RECORD,
     build_skillhub_download_url,
+    installed_marketplace_names,
+    installed_marketplace_resource_id,
     normalize_skillhub_response,
     normalize_skillhub_source,
     parse_skillhub_locator,
     resolve_marketplace_install_source,
 )
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        None,
+        "broken json",
+        [],
+        {},
+        {"resource_type": "plugin", "resource_id": "other"},
+        {"resource_type": "skill", "resource_id": 123},
+        {"resource_type": "skill", "resource_id": ""},
+    ],
+)
+def test_unrelated_or_invalid_manifest_is_not_a_marketplace_install(tmp_path, manifest):
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("A skill", encoding="utf-8")
+    if manifest is not None:
+        (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert installed_marketplace_resource_id(skill) is None
+
+
+def test_marketplace_identity_survives_skill_directory_rename(tmp_path):
+    directory = tmp_path / "renamed-local-skill"
+    directory.mkdir()
+    (directory / "SKILL.md").write_text("A skill", encoding="utf-8")
+    (directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "resource_type": "skill",
+                "resource_id": "resource_original",
+                "version": "1.0.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert installed_marketplace_resource_id(directory / "SKILL.md") == "resource_original"
+
+
+def test_official_name_prefers_receipt_and_recovers_old_installs_from_matching_history(tmp_path):
+    skill_path = tmp_path / "SKILL.md"
+    manifest = {"resource_type": "skill", "resource_id": "resource_anki", "version": "1.0.0"}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+
+    def job(filename, **overrides):
+        data = {
+            **manifest,
+            "resource_name": "Anki 记忆卡片助手",
+            "status": "installed",
+            "created_at": 1,
+            **overrides,
+        }
+        (jobs / filename).write_text(json.dumps(data), encoding="utf-8")
+
+    job("success.json")
+    job("failed.json", status="failed", resource_name="Wrong failed name", created_at=10)
+    job("other-version.json", version="2.0.0", resource_name="Wrong version", created_at=20)
+    job("other-resource.json", resource_id="other", resource_name="Wrong resource", created_at=30)
+    assert installed_marketplace_names([skill_path], jobs)[str(skill_path)] == "Anki 记忆卡片助手"
+    receipt = tmp_path / MARKETPLACE_INSTALL_RECORD
+    receipt.write_text(
+        json.dumps({**manifest, "resource_name": "Updated formal name"}), encoding="utf-8"
+    )
+    assert installed_marketplace_names([skill_path], jobs)[str(skill_path)] == "Updated formal name"
+    receipt.write_text(
+        json.dumps({**manifest, "resource_id": "other", "resource_name": "Wrong receipt"}),
+        encoding="utf-8",
+    )
+    assert installed_marketplace_names([skill_path], jobs)[str(skill_path)] == "Anki 记忆卡片助手"
+    (tmp_path / "manifest.json").unlink()
+    assert installed_marketplace_names([skill_path], jobs) == {}
 
 
 def test_skillhub_payload_is_normalized_to_provider_neutral_model() -> None:

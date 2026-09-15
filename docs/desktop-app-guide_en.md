@@ -198,12 +198,15 @@ Skills are extensible capability modules for OpenAkita, following the Agent Skil
 
 ### 3.2 Skill Marketplace
 
-Marketplace data is provided by [SkillHub](https://skillhub.cn) and normalized by OpenAkita:
+The Skills page defaults to **Installed**, followed by **OpenAkita Official Marketplace** and **SkillHub**. Each marketplace has its own list; search and filters apply only to the selected marketplace.
 
-- **Real-time search**: Search the skill library by keyword
-- **Popularity sorting**: Results are sorted by download count
-- **One-click install**: Safely download from the SkillHub registry and register locally
-- **Default recommendations**: Popular skills shown on entry
+- **Official marketplace**: Search skills, filter by category, sort by popularity, newest release or acquisition count, and browse with pagination.
+- **Get official marketplace skills**: Select “Get”, sign in and acquire the resource on the marketplace, then return to OpenAkita through the existing installation flow. The installed list refreshes after installation.
+- **Installed names**: Marketplace skills prefer the official name saved during installation, including offline display and name search. Internal identifiers and `SKILL.md` remain unchanged. Older installs can recover names from successful installation history matching the resource ID and version; without a matching record, the local skill name is used.
+- **SkillHub**: Keyword search and installation from the SkillHub registry remain available.
+- **Use in chat**: Refer to a skill by its official marketplace name. The assistant's catalog includes both the official name and internal ID; ambiguous names return candidate IDs for explicit selection before execution.
+- **Unavailable marketplace**: Retry or explicitly switch to SkillHub; resources from another source are never substituted automatically.
+- **Direct links**: `#/skills` opens Installed; `#/skills?source=official` and `#/skills?source=skillhub` open the respective marketplaces.
 
 ### 3.3 Built-in Skills
 

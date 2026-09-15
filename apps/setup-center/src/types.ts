@@ -586,6 +586,7 @@ export type SkillInfo = {
   category?: string | null;
   path?: string | null;
   sourceUrl?: string | null;
+  marketplaceName?: string | null;
   config?: SkillConfigField[] | null;
   configComplete?: boolean;
 };

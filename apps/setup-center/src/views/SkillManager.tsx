@@ -36,12 +36,22 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ModalOverlay } from "../components/ModalOverlay";
+import { OfficialSkillMarketplace } from "./OfficialSkillMarketplace";
+
+type SkillTab = "installed" | "official" | "marketplace";
+
+function skillTabFromHash(): SkillTab {
+  const [path, query] = window.location.hash.replace(/^#\/?/, "").split("?");
+  if (path !== "skills") return "installed";
+  const source = new URLSearchParams(query).get("source");
+  return source === "official" ? "official" : source === "skillhub" ? "marketplace" : "installed";
+}
 
 // ─── i18n 辅助：按当前语言优先显示中文名/描述 ───
 
 function getSkillDisplayName(skill: SkillInfo, lang: string): string {
   const key = lang.startsWith("zh") ? "zh" : lang;
-  return skill.name_i18n?.[key] || skill.name;
+  return skill.marketplaceName || skill.name_i18n?.[key] || skill.name;
 }
 
 function getSkillDisplayDesc(skill: SkillInfo, lang: string): string {
@@ -1315,6 +1325,7 @@ export function SkillManager({
   apiBaseUrl = "http://127.0.0.1:18900",
   serviceRunning = false,
   dataMode = "local",
+  desktopVersion = "0.0.0",
 }: {
   venvDir: string;
   currentWorkspaceId: string | null;
@@ -1324,8 +1335,19 @@ export function SkillManager({
   apiBaseUrl?: string;
   serviceRunning?: boolean;
   dataMode?: "local" | "remote";
+  desktopVersion?: string;
 }) {
-  const [tab, setTab] = useState<"installed" | "marketplace">("installed");
+  const [tab, updateTab] = useState<SkillTab>(skillTabFromHash);
+  const setTab = useCallback((next: SkillTab) => {
+    updateTab(next);
+    window.location.hash = next === "installed" ? "/skills"
+      : `/skills?source=${next === "official" ? "official" : "skillhub"}`;
+  }, []);
+  useEffect(() => {
+    const sync = () => updateTab(skillTabFromHash());
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1334,6 +1356,7 @@ export function SkillManager({
   const [marketplace, setMarketplace] = useState<MarketplaceSkillView[]>([]);
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketSearch, setMarketSearch] = useState("");
+  const [marketError, setMarketError] = useState<string | null>(null);
   const [installingSet, setInstallingSet] = useState<Set<string>>(new Set());
   const [manualUrl, setManualUrl] = useState("");
   const [manualInstalling, setManualInstalling] = useState(false);
@@ -1478,6 +1501,7 @@ export function SkillManager({
         category: s.category as string | null,
         path: s.path as string | null,
         sourceUrl: (s.source_url as string | null) || null,
+        marketplaceName: (s.marketplace_name as string | null) || null,
         config: (s.config as SkillConfigField[] | null) || null,
         configComplete: true,  // 由 useMemo 动态计算，这里先占位
       }));
@@ -1820,6 +1844,7 @@ export function SkillManager({
     if (!q) return skillsWithConfig;
     return skillsWithConfig.filter((s) => {
       if (s.name.toLowerCase().includes(q)) return true;
+      if (s.marketplaceName?.toLowerCase().includes(q)) return true;
       if (s.description && s.description.toLowerCase().includes(q)) return true;
       if (s.category && s.category.toLowerCase().includes(q)) return true;
       if (s.path) {
@@ -2206,7 +2231,7 @@ export function SkillManager({
   const searchMarketplace = useCallback(async (query: string) => {
     const reqId = ++marketRequestId.current;
     setMarketLoading(true);
-    setError(null);
+    setMarketError(null);
     try {
       const q = query.trim() || "agent";  // 默认搜索 "agent" 展示热门技能
       let data: MarketplaceResponse | null = null;
@@ -2245,7 +2270,7 @@ export function SkillManager({
     } catch (e) {
       if (reqId !== marketRequestId.current) return;
       // 失败时不清空已有数据，只在没有任何数据时显示错误
-      setError(`${t("skills.marketplace")}: ${friendlyError(e, t)}`);
+      setMarketError(`${t("skills.skillHub")}: ${friendlyError(e, t)}`);
     } finally {
       if (reqId === marketRequestId.current) {
         setMarketLoading(false);
@@ -2423,13 +2448,13 @@ export function SkillManager({
         <ToggleGroup
           type="single"
           value={tab}
-          onValueChange={(v) => { if (v) setTab(v as "installed" | "marketplace"); }}
+          onValueChange={(v) => { if (v) setTab(v as SkillTab); }}
           variant="outline"
-          className="justify-start"
+          className="w-full justify-start sm:w-fit"
         >
           <ToggleGroupItem
             value="installed"
-            className="text-sm min-w-[5.5rem] data-[state=on]:bg-primary data-[state=on]:text-primary-foreground data-[state=on]:border-primary"
+            className="px-2 text-xs sm:px-3 sm:text-sm sm:min-w-[5.5rem] data-[state=on]:bg-primary data-[state=on]:text-primary-foreground data-[state=on]:border-primary"
           >
             {t("skills.installed")}
             <Badge
@@ -2444,14 +2469,20 @@ export function SkillManager({
             </Badge>
           </ToggleGroupItem>
           <ToggleGroupItem
-            value="marketplace"
-            className="text-sm min-w-[5.5rem] data-[state=on]:bg-primary data-[state=on]:text-primary-foreground data-[state=on]:border-primary"
+            value="official"
+            className="h-auto min-h-9 min-w-0 flex-1 whitespace-normal px-2 text-xs sm:flex-none sm:px-3 sm:text-sm data-[state=on]:bg-primary data-[state=on]:text-primary-foreground data-[state=on]:border-primary"
           >
-            {t("skills.marketplace")}
+            {t("skills.officialMarket.title")}
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="marketplace"
+            className="px-2 text-xs sm:px-3 sm:text-sm sm:min-w-[5.5rem] data-[state=on]:bg-primary data-[state=on]:text-primary-foreground data-[state=on]:border-primary"
+          >
+            {t("skills.skillHub")}
           </ToggleGroupItem>
         </ToggleGroup>
         <div className="flex-1" />
-        <Button
+        {tab === "installed" && <Button
           variant="outline"
           onClick={async () => {
             if (refreshing || loading) return;
@@ -2490,10 +2521,13 @@ export function SkillManager({
         >
           {(refreshing || loading) && <Loader2 className="animate-spin mr-1.5" size={14} />}
           {t("topbar.refresh")}
-        </Button>
+        </Button>}
       </div>
 
-      {error && <div className="p-4 rounded-md bg-destructive/10 border border-destructive/20 text-destructive text-sm">{error}</div>}
+      {tab !== "official" && error && <div className="p-4 rounded-md bg-destructive/10 border border-destructive/20 text-destructive text-sm">{error}</div>}
+
+      <OfficialSkillMarketplace apiBaseUrl={apiBaseUrl} desktopVersion={desktopVersion}
+        visible={tab === "official"} onSkillHub={query => { setMarketSearch(query); setTab("marketplace"); }} />
 
       {/* 已安装技能 */}
       {tab === "installed" && (
@@ -2579,6 +2613,10 @@ export function SkillManager({
                 <IconZap size={40} className="text-muted-foreground/30 mb-3" />
                 <p className="text-sm font-bold text-foreground mb-1">{t("skills.noSkills")}</p>
                 <p className="text-xs text-muted-foreground/60 mb-4">{t("skills.noSkillsHint")}</p>
+                <div className="mb-3 flex flex-wrap justify-center gap-2">
+                  <Button onClick={() => setTab("official")}>{t("skills.officialMarket.browse")}</Button>
+                  <Button variant="outline" onClick={() => setTab("marketplace")}>{t("skills.skillHub")}</Button>
+                </div>
                 {dataMode !== "remote" && (
                   <Button
                     variant="outline"
@@ -2854,6 +2892,7 @@ export function SkillManager({
       {/* 技能市场 */}
       {tab === "marketplace" && (
         <div className="flex flex-col gap-4">
+          {marketError && <div role="alert" className="rounded-md bg-destructive/10 p-4 text-sm text-destructive">{marketError}</div>}
           {/* 安全提示 */}
           <div className="flex items-start gap-2 px-4 py-3 rounded-md bg-amber-500/10 border border-amber-500/20 text-xs text-amber-600 dark:text-amber-400">
             <span className="font-bold text-sm shrink-0">&#9888;</span>
@@ -2904,7 +2943,7 @@ export function SkillManager({
                     <Input
                       value={marketSearch}
                       onChange={(e) => setMarketSearch(e.target.value)}
-                      placeholder={t("skills.searchPlaceholder")}
+                      placeholder={t("skills.skillHubSearch")}
                       className="pl-9 h-9 text-sm"
                     />
                   </div>
@@ -2936,12 +2975,12 @@ export function SkillManager({
               );
             })}
             
-            {!marketLoading && marketplace.length === 0 && (
+            {!marketLoading && !marketError && marketplace.length === 0 && (
               <Card className="border-dashed border-border/80 shadow-sm">
                 <CardContent className="flex flex-col items-center justify-center py-14">
                   <IconSearch size={32} className="text-muted-foreground/30 mb-3" />
                   <p className="text-sm text-muted-foreground">
-                    {marketSearch ? t("skills.noResults") : t("skills.noSkills")}
+                    {marketSearch ? t("skills.noResults") : t("skills.marketEmpty")}
                   </p>
                 </CardContent>
               </Card>
