@@ -273,6 +273,9 @@ class OpenAIResponsesProvider(OpenAIProvider):
             if val is not None and (not isinstance(val, int) or val <= 0):
                 body.pop(key, None)
 
+        from ..request_budget import validate_request_body
+
+        validate_request_body(body, self.config)
         return body
 
     def _parse_response(self, data: dict) -> LLMResponse:

@@ -913,6 +913,11 @@ class Settings(BaseSettings):
     )
 
     # === 上下文管理配置 ===
+    context_summary_max_calls: int = Field(default=12, ge=1, le=64)
+    context_summary_max_tokens: int = Field(default=120000, ge=1024)
+    context_summary_timeout_seconds: float = Field(default=60, gt=0)
+    context_summary_failure_threshold: int = Field(default=2, ge=1)
+    context_summary_backoff_seconds: float = Field(default=60, gt=0)
     context_max_window: int = Field(
         default=0,
         description="全局上下文最大输入长度 (tokens)。实际生效时取 min(此值, 端点 context_window)。0=不限制，直接使用端点上限",

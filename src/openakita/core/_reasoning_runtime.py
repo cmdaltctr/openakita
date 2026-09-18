@@ -1084,6 +1084,9 @@ class ReasoningEngine:
         tokens: int,
     ) -> None:
         """Shrink large tool payloads after a token spike to avoid replay storms."""
+        if active_transcript.get() is not None:
+            # Durable history changes only through the validated compression pipeline.
+            return
         anomaly_threshold = int(
             getattr(settings, "context_token_anomaly_threshold", TOKEN_ANOMALY_THRESHOLD)
             or TOKEN_ANOMALY_THRESHOLD
@@ -2227,6 +2230,18 @@ class ReasoningEngine:
                             scratchpad_summary=_scratchpad,
                             completed_tools=executed_tool_names,
                             task_description=task_description,
+                        )
+                        transcript = active_transcript.get()
+                        if transcript is not None:
+                            working_messages = transcript.retain_context(working_messages)
+                        self._context_manager.validate_projection(
+                            working_messages,
+                            system_prompt=effective_prompt,
+                            tools=tools,
+                            conversation_id=conversation_id,
+                        )
+                        _after_tokens = self._context_manager.estimate_messages_tokens(
+                            working_messages
                         )
                         _ctx_compressed_info = {
                             "before_tokens": _before_tokens,
@@ -6755,6 +6770,39 @@ class ReasoningEngine:
 
         if not task_monitor:
             return None
+
+        if active_transcript.get() is not None and any(
+            pattern in str(error).lower()
+            for pattern in (
+                "context window",
+                "context length",
+                "context_length_exceeded",
+                "too many tokens",
+                "token limit",
+                "payload",
+                "(413)",
+                "input too long",
+            )
+        ):
+            if getattr(state, "_durable_overflow_retried", False):
+                return None
+            state._durable_overflow_retried = True
+            try:
+                candidate = await self._context_manager.reactive_compact(
+                    working_messages,
+                    system_prompt=getattr(state, "_system_prompt", ""),
+                    memory_manager=self._memory_manager,
+                    conversation_id=getattr(state, "session_id", None),
+                )
+            except _CtxCancelledError:
+                raise
+            except Exception:
+                logger.warning("Durable context recovery failed; refusing destructive fallback")
+                return None
+            if candidate == working_messages:
+                return None
+            working_messages[:] = candidate
+            return "retry"
 
         # ── 全局重试计数器（跨模型切换） ──
         # 无论错误类型，总重试次数达到上限即终止并告知用户。

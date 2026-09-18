@@ -397,6 +397,9 @@ class AnthropicProvider(LLMProvider):
             else:
                 body.pop("thinking_depth", None)
 
+        from ..request_budget import validate_request_body
+
+        validate_request_body(body, self.config)
         return body
 
     @staticmethod

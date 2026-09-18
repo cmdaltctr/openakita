@@ -19,6 +19,7 @@ import asyncio
 import base64
 import contextlib
 import contextvars
+import copy
 import json
 import logging
 import os
@@ -3739,6 +3740,15 @@ class Agent:
         session: object | None = None,
     ) -> list[dict]:
         """Compress session history during prepare without reusing stale cancel signals."""
+        from ..sessions.manager import SessionManager
+
+        if await SessionManager.has_model_transcript(
+            data_dir=settings.data_dir,
+            conversation_id=conversation_id,
+            session=session,
+            profile=str(getattr(getattr(session, "context", None), "agent_profile_id", "default")),
+        ):
+            return messages
         active_task = None
         if self.agent_state:
             active_task = self.agent_state.get_task_for_session(session_id)
@@ -4884,11 +4894,11 @@ class Agent:
                 )
                 if checkpoint and profile_matches and source_matches:
                     history_messages = session_messages[source_count:]
-                    checkpoint_seed = list(checkpoint.get("projected_messages") or [])
+                    checkpoint_seed = copy.deepcopy(checkpoint.get("projected_messages") or [])
                     if not checkpoint_seed:
                         checkpoint_seed = self.context_manager._inject_summary_into_recent(
                             str(checkpoint.get("summary") or ""),
-                            list(checkpoint.get("recent_messages") or []),
+                            copy.deepcopy(checkpoint.get("recent_messages") or []),
                         )
                     logger.info(
                         "[Session:%s] Applied durable compaction checkpoint %s",

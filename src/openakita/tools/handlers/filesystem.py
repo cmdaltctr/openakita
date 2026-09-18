@@ -808,6 +808,8 @@ class FilesystemHandler:
         path = params.get("path", "")
         if not path:
             return "❌ read_file 缺少必要参数 'path'。"
+        if path.startswith("memory://tool-output/"):
+            return await self._read_cold_output(path, params)
         unc_err = self._check_unc(path)
         if unc_err:
             return f"❌ {unc_err}"
@@ -878,6 +880,35 @@ class FilesystemHandler:
             )
 
         self._remember_read_file_cache(cache_key, result)
+        return result
+
+    async def _read_cold_output(self, path: str, params: dict) -> str:
+        """Read immutable evidence in bounded character pages, under its owning session."""
+        import asyncio
+        import re
+
+        blob_id = path.removeprefix("memory://tool-output/")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", blob_id):
+            return "Invalid tool output reference."
+        memory = getattr(self.agent, "memory_manager", None)
+        reader = getattr(memory, "get_cold_tool_output", None)
+        if not callable(reader):
+            return "Tool output storage is unavailable."
+        # The store enforces the active memory session; callers cannot supply another owner.
+        content = await asyncio.to_thread(reader, blob_id)
+        if content is None:
+            return "Tool output is missing, expired, or unavailable in this session."
+        try:
+            offset = max(1, int(params.get("offset", 1)))
+            limit = min(16000, max(1, int(params.get("limit", 8000))))
+        except (TypeError, ValueError):
+            return "offset and limit must be positive integers."
+        start = offset - 1
+        end = min(len(content), start + limit)
+        result = f"[Archived tool evidence; character offset={offset}; total={len(content)}]\n"
+        result += content[start:end]
+        if end < len(content):
+            result += f'\n[PAGE_HAS_MORE] read_file(path="{path}", offset={end + 1}, limit={limit})'
         return result
 
     def _remember_read_file_cache(self, key: tuple[str, int, int], result: str) -> None:

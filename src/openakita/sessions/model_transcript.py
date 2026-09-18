@@ -80,6 +80,7 @@ class ModelTranscript:
         self.working_messages: list[dict] = []
         self.outcomes: dict[str, dict] = {}
         self.partial: dict[str, str] = {"text": "", "thinking": ""}
+        self.pending_compaction: dict = {}
         self._lock: asyncio.Lock | None = None
         self._commit_lock = asyncio.Lock()
         self._file_lock: FileLock | None = None
@@ -345,6 +346,22 @@ class ModelTranscript:
             return
         # Compression and explicit repairs start a new model-visible baseline.
         # Carry retained section states, including clears, when compression omitted them.
+        candidate = self.retain_context(messages)
+        await self._commit(
+            "baseline",
+            candidate,
+            reason=reason,
+            compaction=self.pending_compaction,
+            clear_partial=reason == "interrupted_tool_recovery",
+        )
+        self.pending_compaction = {}
+        messages[:] = copy.deepcopy(candidate)
+        logger.info(
+            "Model transcript baseline changed: reason=%s revision=%s", reason, self.revision
+        )
+
+    def retain_context(self, messages: list[dict]) -> list[dict]:
+        """Preview the complete baseline before budget validation or persistence."""
         candidate = copy.deepcopy(messages)
         for key, old in self.latest_context().items():
             if not any(
@@ -353,16 +370,7 @@ class ModelTranscript:
                 for m in candidate
             ):
                 candidate.append(copy.deepcopy(old))
-        await self._commit(
-            "baseline",
-            candidate,
-            reason=reason,
-            clear_partial=reason == "interrupted_tool_recovery",
-        )
-        messages[:] = copy.deepcopy(candidate)
-        logger.info(
-            "Model transcript baseline changed: reason=%s revision=%s", reason, self.revision
-        )
+        return candidate
 
 
 async def commit_model_messages(messages: list[dict]) -> None:

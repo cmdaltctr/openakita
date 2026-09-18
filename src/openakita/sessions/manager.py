@@ -76,6 +76,40 @@ class SessionManager:
     """
 
     @staticmethod
+    async def has_model_transcript(*, data_dir, conversation_id, session=None, profile="default"):
+        """Read-only presence check; preparation must not compress a discarded UI projection."""
+        import sqlite3
+
+        from .model_transcript import new_stream_id
+
+        path = Path(data_dir) / "model-transcripts.sqlite3"
+        if not conversation_id or not path.exists():
+            return False
+        variables = getattr(getattr(session, "context", None), "variables", {})
+        reset = variables.get("_context_reset_at", "") if isinstance(variables, dict) else ""
+        identity = getattr(session, "id", "")
+        if isinstance(identity, str) and identity:
+            reset = f"{identity}:{reset}"
+        stream = new_stream_id(conversation_id, profile, reset, False)
+
+        def exists():
+            with contextlib.closing(
+                sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+            ) as db:
+                if not db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='model_events'"
+                ).fetchone():
+                    return False
+                return (
+                    db.execute(
+                        "SELECT 1 FROM model_events WHERE stream=? LIMIT 1", (stream,)
+                    ).fetchone()
+                    is not None
+                )
+
+        return await asyncio.to_thread(exists)
+
+    @staticmethod
     async def open_model_transcript(
         *,
         data_dir: Path,

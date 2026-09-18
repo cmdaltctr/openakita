@@ -1,4 +1,7 @@
+import pytest
+
 from openakita.agent.context import ContextManager
+from openakita.core.compression_contract import CompressionError
 
 
 class DummyBrain:
@@ -31,7 +34,10 @@ def test_hard_truncate_preserves_current_turn_image():
         },
     ]
 
-    result = cm._hard_truncate_if_needed(messages, hard_limit=100)
+    # A 100-token window cannot contain the protected image (~1600 tokens).
+    with pytest.raises(CompressionError):
+        cm._hard_truncate_if_needed(messages, hard_limit=100)
+    result = cm._hard_truncate_if_needed(messages, hard_limit=2000)
 
     assert _has_image_block(result[-1]["content"])
     assert "图片内容已移除以节省上下文空间" not in str(result[-1]["content"])

@@ -174,6 +174,8 @@ FILESYSTEM_TOOLS = [
         "category": "File System",
         "description": (
             "Read file content with optional pagination. Default reads first 300 lines.\n\n"
+            "Also reads memory://tool-output/<id> evidence in the current session only. "
+            "For these URIs offset/limit count characters (maximum 16000 per page), not lines.\n"
             "Supports text files, images (jpeg/jpg, png, gif, webp), and PDF files:\n"
             "- Text files: returns numbered lines (LINE_NUMBER|CONTENT format)\n"
             "- Images: returns the image for visual analysis\n"
