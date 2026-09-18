@@ -13,6 +13,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -268,6 +269,8 @@ class AccountOIDCManager:
         self._credential_lock = asyncio.Lock()
         self._generation = 0
         self._access_expires_at = 0.0
+        self._identity_checked_at = 0.0
+        self._identity_checked_subject: str | None = None
         self._access_credential_hash: str | None = None
         self._vault_lock = None
         if isinstance(self._tokens, KeyringTokenStore):
@@ -285,12 +288,16 @@ class AccountOIDCManager:
             if self._vault_lock is None:
                 yield
                 return
-            await asyncio.to_thread(Path(self._vault_lock.lock_file).parent.mkdir,
-                                    parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                Path(self._vault_lock.lock_file).parent.mkdir, parents=True, exist_ok=True
+            )
             while True:
-                acquisition = asyncio.create_task(asyncio.to_thread(
-                    self._vault_lock.acquire, timeout=0,
-                ))
+                acquisition = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._vault_lock.acquire,
+                        timeout=0,
+                    )
+                )
                 try:
                     await asyncio.shield(acquisition)
                     break
@@ -321,7 +328,9 @@ class AccountOIDCManager:
         async with self._credentials():
             return await self._start_locked(generation, flow=flow, redirect_uri=redirect_uri)
 
-    async def _start_locked(self, generation: int, *, flow: str, redirect_uri: str | None) -> LoginAttempt:
+    async def _start_locked(
+        self, generation: int, *, flow: str, redirect_uri: str | None
+    ) -> LoginAttempt:
         if generation != self._generation:
             raise AccountOIDCError("login attempt was superseded")
         for old in self._attempts.values():
@@ -559,8 +568,10 @@ class AccountOIDCManager:
             attempt.status = "exchanging"
             try:
                 await self._complete(
-                    code=code, verifier=attempt.verifier, redirect_uri=attempt.redirect_uri,
-                    generation=attempt.generation
+                    code=code,
+                    verifier=attempt.verifier,
+                    redirect_uri=attempt.redirect_uri,
+                    generation=attempt.generation,
                 )
             except asyncio.CancelledError:
                 attempt.status = "failed"
@@ -622,19 +633,72 @@ class AccountOIDCManager:
                 attempt.device_code = ""
             await self._close_listener(attempt)
 
-    async def snapshot(self) -> dict:
+    async def snapshot(self, *, force: bool = False) -> dict:
         # The identity snapshot is intentionally retained for offline cache and
         # audit purposes. Its presence alone must not make the UI appear signed
         # in after the OS-vault refresh token has been cleared on logout.
         async with self._credentials():
             try:
-                return await self._identity_locked()
+                snapshot = await self._identity_locked()
+                subject = snapshot.get("account_user_id")
+                if not subject or snapshot.get("status") != "active":
+                    return snapshot
+                checked_at = snapshot.get("profile_checked_at")
+                if (
+                    not force
+                    and checked_at
+                    and 0
+                    <= (datetime.now(UTC) - datetime.fromisoformat(checked_at)).total_seconds()
+                    < 20
+                ):
+                    return snapshot
+                if (
+                    not force
+                    and self._identity_checked_subject == subject
+                    and time.monotonic() - self._identity_checked_at < 20
+                ):
+                    return snapshot
+                generation = self._generation
+                access = await self._valid_access_token_locked()
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(
+                        f"{self._base_url}/oauth/userinfo",
+                        headers={"Authorization": f"Bearer {access}"},
+                    )
+                if response.status_code != 200:
+                    raise AccountOIDCError("account identity is temporarily unavailable")
+                profile = response.json()
+                if (
+                    not isinstance(profile, dict)
+                    or profile.get("sub") != subject
+                    or generation != self._generation
+                ):
+                    raise AccountOIDCError("account changed during identity refresh")
+                refresh = await self._tokens.load_refresh_token()
+                if not refresh:
+                    return {"status": "signed_out"}
+                credential_hash = hashlib.sha256(refresh.encode()).hexdigest()
+                if not await self._store.refresh_profile(
+                    credential_hash=credential_hash, profile=profile
+                ):
+                    raise AccountOIDCError("account changed during identity refresh")
+                self._identity_checked_at = time.monotonic()
+                self._identity_checked_subject = subject
+                return await self._store.snapshot(credential_hash=credential_hash)
             except (AccountOIDCError, httpx.HTTPError, ValueError):
                 # A network outage is not a logout, and must not expose an
                 # unrelated cached profile as the owner of the saved token.
-                if not await self._tokens.load_refresh_token():
+                refresh = await self._tokens.load_refresh_token()
+                if not refresh:
                     return {"status": "signed_out"}
-                return {"status": "unavailable", "status_reason": "account_identity_unavailable"}
+                cached = await self._store.snapshot(
+                    credential_hash=hashlib.sha256(refresh.encode()).hexdigest()
+                )
+                return {
+                    **(cached or {}),
+                    "status": "unavailable",
+                    "status_reason": "account_identity_unavailable",
+                }
 
     async def _identity_locked(self) -> dict:
         refresh = await self._tokens.load_refresh_token()
@@ -656,7 +720,11 @@ class AccountOIDCManager:
         if response.status_code != 200:
             raise AccountOIDCError("account identity is temporarily unavailable")
         profile = response.json()
-        if not isinstance(profile, dict) or not isinstance(profile.get("sub"), str) or not profile["sub"]:
+        if (
+            not isinstance(profile, dict)
+            or not isinstance(profile.get("sub"), str)
+            or not profile["sub"]
+        ):
             raise AccountOIDCError("userinfo is missing sub")
         if generation != self._generation:
             raise AccountOIDCError("account changed during identity recovery")
@@ -665,12 +733,17 @@ class AccountOIDCManager:
             return {"status": "signed_out"}
         session_id = secrets.token_urlsafe(18)
         await self._store.save_authenticated(
-            account_user_id=profile["sub"], profile_json=json.dumps(profile),
+            account_user_id=profile["sub"],
+            profile_json=json.dumps(profile),
             session_id=session_id,
             credential_hash=hashlib.sha256(refresh.encode()).hexdigest(),
         )
         self._session_id, self._account_user_id = session_id, profile["sub"]
-        return await self._store.snapshot(credential_hash=hashlib.sha256(refresh.encode()).hexdigest())
+        self._identity_checked_at = time.monotonic()
+        self._identity_checked_subject = profile["sub"]
+        return await self._store.snapshot(
+            credential_hash=hashlib.sha256(refresh.encode()).hexdigest()
+        )
 
     async def refresh_entitlements(self) -> dict:
         async with self._credentials():
@@ -940,6 +1013,8 @@ class AccountOIDCManager:
             self._access_expires_at = time.monotonic() + expires_in
             self._session_id = session_id
             self._account_user_id = account_user_id
+            self._identity_checked_at = time.monotonic()
+            self._identity_checked_subject = account_user_id
             # A temporary entitlement outage must not turn a committed login into failure.
             try:
                 await self._refresh_entitlements_locked()
@@ -992,9 +1067,12 @@ class AccountOIDCManager:
         if rotated:
             await self._tokens.save_refresh_token(rotated)
             await self._store.rotate_credential(
-                credential_hash, hashlib.sha256(rotated.encode()).hexdigest(),
+                credential_hash,
+                hashlib.sha256(rotated.encode()).hexdigest(),
             )
-        self._access_credential_hash = hashlib.sha256((rotated or refresh_token).encode()).hexdigest()
+        self._access_credential_hash = hashlib.sha256(
+            (rotated or refresh_token).encode()
+        ).hexdigest()
         if not self._access_token:
             raise AccountOIDCError("refresh response is incomplete")
         self._access_expires_at = time.monotonic() + max(0, int(tokens.get("expires_in", 0)))

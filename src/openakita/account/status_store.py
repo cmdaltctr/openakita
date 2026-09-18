@@ -16,6 +16,13 @@ from openakita.storage.safe_sqlite import safe_open_async
 EVENT_TYPE = "account.user.status.changed"
 
 
+def identity_version(profile: dict) -> int:
+    value = profile.get("identity_version", 0)
+    if type(value) is not int or value < 0:
+        raise ValueError("invalid identity version")
+    return value
+
+
 class StatusPropagationError(Exception):
     status_code = 400
     error = "invalid_event"
@@ -95,6 +102,10 @@ class AccountStatusStore:
                 profile_json TEXT NOT NULL,
                 entitlements_json TEXT NOT NULL DEFAULT '{}',
                 fetched_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS account_profile_checks (
+                account_user_id TEXT PRIMARY KEY,
+                checked_at TEXT NOT NULL
             );
             """
         )
@@ -199,13 +210,26 @@ class AccountStatusStore:
             await conn.close()
 
     async def save_authenticated(
-        self, *, account_user_id: str, profile_json: str, session_id: str,
+        self,
+        *,
+        account_user_id: str,
+        profile_json: str,
+        session_id: str,
         credential_hash: str | None = None,
     ) -> None:
         now = datetime.now(UTC).isoformat()
         conn = await self._connect()
         try:
             await conn.execute("BEGIN IMMEDIATE")
+            cursor = await conn.execute(
+                "SELECT profile_json FROM account_identity_snapshot WHERE account_user_id=?",
+                (account_user_id,),
+            )
+            previous = await cursor.fetchone()
+            if previous and identity_version(
+                json.loads(previous["profile_json"])
+            ) > identity_version(json.loads(profile_json)):
+                profile_json = previous["profile_json"]
             await conn.execute(
                 """
                 INSERT INTO account_users
@@ -243,7 +267,43 @@ class AccountStatusStore:
                 """,
                 (session_id, account_user_id, now, credential_hash),
             )
+            await conn.execute(
+                "INSERT INTO account_profile_checks VALUES (?, ?) ON CONFLICT(account_user_id) DO UPDATE SET checked_at=excluded.checked_at",
+                (account_user_id, now),
+            )
             await conn.commit()
+        finally:
+            await conn.close()
+
+    async def refresh_profile(self, *, credential_hash: str, profile: dict) -> bool:
+        """Update only the current grant's owner, without creating a new session."""
+        conn = await self._connect()
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            cursor = await conn.execute(
+                "SELECT s.profile_json FROM account_identity_snapshot s "
+                "JOIN account_sessions a ON a.account_user_id=s.account_user_id "
+                "WHERE a.refresh_token_hash=? AND a.revoked_at IS NULL "
+                "AND a.account_user_id=? LIMIT 1",
+                (credential_hash, profile["sub"]),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return False
+            previous = json.loads(row["profile_json"])
+            if identity_version(profile) < identity_version(previous):
+                return True
+            await conn.execute(
+                "UPDATE account_identity_snapshot SET profile_json=?, fetched_at=? "
+                "WHERE account_user_id=?",
+                (json.dumps(profile), datetime.now(UTC).isoformat(), profile["sub"]),
+            )
+            await conn.execute(
+                "INSERT INTO account_profile_checks VALUES (?, ?) ON CONFLICT(account_user_id) DO UPDATE SET checked_at=excluded.checked_at",
+                (profile["sub"], datetime.now(UTC).isoformat()),
+            )
+            await conn.commit()
+            return True
         finally:
             await conn.close()
 
@@ -268,9 +328,10 @@ class AccountStatusStore:
             cursor = await conn.execute(
                 """
                 SELECT s.account_user_id, s.profile_json, s.entitlements_json,
-                       s.fetched_at, u.status, u.status_reason
+                       s.fetched_at, u.status, u.status_reason, p.checked_at
                 FROM account_identity_snapshot s
                 JOIN account_users u ON u.account_user_id = s.account_user_id
+                LEFT JOIN account_profile_checks p ON p.account_user_id = s.account_user_id
                 WHERE (? IS NULL OR EXISTS (
                     SELECT 1 FROM account_sessions a
                     WHERE a.account_user_id = s.account_user_id
@@ -288,6 +349,7 @@ class AccountStatusStore:
                 "profile": json.loads(row["profile_json"]),
                 "entitlements": json.loads(row["entitlements_json"]),
                 "fetched_at": row["fetched_at"],
+                "profile_checked_at": row["checked_at"],
                 "status": row["status"],
                 "status_reason": row["status_reason"],
             }

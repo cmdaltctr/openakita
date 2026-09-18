@@ -4326,13 +4326,12 @@ export function ChatView({
       const isActiveTodo = (todo?: ChatTodo | null) =>
         !!todo && todo.status !== "completed" && todo.status !== "failed" && todo.status !== "cancelled";
       const terminalizeTodo = (todo: ChatTodo, status: Extract<ChatTodo["status"], "completed" | "cancelled">): ChatTodo => {
-        const stepStatus = status === "cancelled" ? "cancelled" : "completed";
         return {
           ...todo,
           status,
           steps: todo.steps.map((step) =>
-            step.status === "pending" || step.status === "in_progress"
-              ? { ...step, status: stepStatus }
+            status === "cancelled" && (step.status === "pending" || step.status === "in_progress")
+              ? { ...step, status: "cancelled" as const }
               : step
           ),
         };
@@ -5080,8 +5079,11 @@ export function ChatView({
                       ? { ...s, status: event.status as ChatTodoStep["status"], result: event.result ?? s.result }
                       : s;
                   });
-                  const allDone = newSteps.every((s) => s.status === "completed" || s.status === "skipped" || s.status === "failed");
-                  currentPlan = { ...currentPlan, steps: newSteps, ...(allDone ? { status: "completed" as const } : {}) } as ChatTodo;
+                  const allDone = newSteps.every((s) => ["completed", "skipped", "failed", "cancelled"].includes(s.status));
+                  const planStatus: ChatTodo["status"] = !allDone ? "in_progress"
+                    : newSteps.some((s) => s.status === "failed") ? "failed"
+                    : newSteps.some((s) => s.status === "cancelled") ? "cancelled" : "completed";
+                  currentPlan = { ...currentPlan, steps: newSteps, status: planStatus } as ChatTodo;
                   updateMessages((prev) => prev.map((m) =>
                     m.id === assistantMsg.id ? { ...m, todo: { ...currentPlan! }, progressEvents: [...currentProgressEvents] } : m
                   ));
@@ -5535,40 +5537,8 @@ export function ChatView({
                     };
                   }
                 }
-                let shouldTerminalizePlan = false;
-                if (
-                  currentPlan &&
-                  currentPlan.status === "in_progress" &&
-                  currentAsk === null &&
-                  !pendingApprovalRef.current
-                ) {
-                  shouldTerminalizePlan = true;
-                  const plan = currentPlan;
-                  const planId = plan.id || "";
-                  const alreadyRecordedCompletion = currentProgressEvents.some(
-                    (ev) => ev.type === "todo_completed" && (!planId || !ev.planId || ev.planId === planId),
-                  );
-                  if (!alreadyRecordedCompletion) {
-                    currentProgressEvents = [
-                      ...currentProgressEvents,
-                      {
-                        type: "todo_completed",
-                        seq: currentProgressEvents.length + 1,
-                        ...(planId ? { planId } : {}),
-                      },
-                    ];
-                  }
-                  currentPlan = terminalizeTodo(plan, "completed");
-                }
-                if (shouldTerminalizePlan) updateMessages((prev) => {
-                  const hasStaleTodo = prev.some((m) => m.id !== assistantMsg.id && m.todo && m.todo.status !== "completed" && m.todo.status !== "failed" && m.todo.status !== "cancelled");
-                  if (!hasStaleTodo) return prev;
-                  return prev.map((m) =>
-                    m.id !== assistantMsg.id && m.todo && m.todo.status !== "completed" && m.todo.status !== "failed" && m.todo.status !== "cancelled"
-                      ? { ...m, todo: terminalizeTodo(m.todo, "completed") }
-                      : m
-                  );
-                });
+                // A completed response does not imply completed Todo steps.
+                // Only explicit plan/step events may change the persisted plan state.
                 if (pendingApprovalRef.current) {
                   setPendingApproval(pendingApprovalRef.current);
                   pendingApprovalRef.current = null;

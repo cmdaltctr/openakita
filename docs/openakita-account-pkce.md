@@ -271,3 +271,15 @@ enable/disable choice and category edits. Install and uninstall share the
 workspace path, and successful installation refreshes the Skill list.
 
 See [the testing guide](testing.md#账号与市场回归测试) for focused regression suites.
+
+## Identity freshness
+
+`GET /api/account/status` rechecks Account userinfo after 20 seconds; `?refresh=true`
+bypasses the cache. The sidebar forces a refresh when returning to the app and
+while visible on its existing 30-second timer. Profile writes are bound to the
+current refresh grant and serialized with native credential rotation. Increasing
+`identity_version` values prevent older responses from reverting email state.
+Account outages return `status=unavailable` while retaining the last profile and
+credential for retry. Local status events and entitlements remain separate.
+
+Deploy Account's versioned userinfo first, then distribute the updated client.

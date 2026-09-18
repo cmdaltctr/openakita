@@ -89,7 +89,9 @@ async def login_status(request: Request, response: Response, attempt_id: str) ->
 
 
 @router.get("/status")
-async def account_status(request: Request) -> dict:
+async def account_status(request: Request, refresh: bool = False) -> dict:
+    if refresh:
+        return await _manager(request).snapshot(force=True)
     return await _manager(request).snapshot()
 
 

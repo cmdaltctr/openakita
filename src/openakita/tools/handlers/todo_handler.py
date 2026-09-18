@@ -151,7 +151,7 @@ class PlanHandler:
             return None
         return self.current_todo
 
-    def finalize_plan(self, plan: dict, session_id: str, action: str = "auto_close") -> None:
+    def finalize_plan(self, plan: dict, session_id: str, action: str = "auto_close") -> bool:
         """计划收尾（供 todo_state 模块调用）
 
         封装 auto_close_todo / cancel_todo 中对 handler 私有成员的全部访问，
@@ -172,39 +172,26 @@ class PlanHandler:
             if not plan.get("summary"):
                 plan["summary"] = "用户主动取消"
             self._add_log("计划被用户取消", plan=plan)
-        elif action == "final_answer":
-            for step in steps:
-                status = step.get("status", "pending")
-                if status in ("in_progress", "pending"):
-                    step["status"] = "completed"
-                    step["result"] = step.get("result") or "(最终答复已生成)"
-                    step["completed_at"] = now
+        else:
+            # Ending a response is an execution fact, not evidence that a step succeeded.
+            if action == "final_answer":
+                plan["last_response_end"] = {"reason": "final_answer", "observed_at": now}
+            if not steps or any(step.get("status") != "completed" for step in steps):
+                self._save_plan_markdown(plan=plan)
+                self._store.upsert(session_id, plan)
+                self._store.save()
+                return False
             plan["status"] = "completed"
             plan["completed_at"] = now
-            if not plan.get("summary"):
-                plan["summary"] = "任务结束，计划随最终答复自动完成"
-            self._add_log("计划随最终答复自动完成", plan=plan)
-        else:  # auto_close
-            for step in steps:
-                status = step.get("status", "pending")
-                if status == "in_progress":
-                    step["status"] = "completed"
-                    step["result"] = step.get("result") or "(自动标记完成)"
-                    step["completed_at"] = now
-                elif status == "pending":
-                    step["status"] = "skipped"
-                    step["result"] = "(任务结束时未执行到)"
-            plan["status"] = "completed"
-            plan["completed_at"] = now
-            if not plan.get("summary"):
-                plan["summary"] = "任务结束，计划自动关闭"
-            self._add_log("计划自动关闭（任务结束时未显式 complete_todo）", plan=plan)
+            self._add_log("计划收尾：全部步骤已显式标记完成", plan=plan)
 
         self._save_plan_markdown(plan=plan)
         self._todos_by_session.pop(session_id, None)
         if self.current_todo is plan:
             self.current_todo = None
         self._store.remove(session_id)
+        self._store.save()
+        return True
 
     async def handle(self, tool_name: str, params: dict[str, Any]) -> str:
         """处理工具调用"""
@@ -548,11 +535,13 @@ class PlanHandler:
 
         completed = sum(1 for s in steps if s["status"] == "completed")
         failed = sum(1 for s in steps if s["status"] == "failed")
+        skipped = sum(1 for s in steps if s["status"] == "skipped")
+        cancelled = sum(1 for s in steps if s["status"] == "cancelled")
 
         self._save_plan_markdown()
         self._add_log(f"计划完成：{summary}")
 
-        complete_message = f"""🎉 **任务完成！**
+        complete_message = f"""📋 **计划已结束（不代表所有步骤成功）**
 
 {summary}
 
@@ -560,6 +549,8 @@ class PlanHandler:
 - 总步骤：{len(steps)}
 - 成功：{completed}
 - 失败：{failed}
+- 跳过：{skipped}
+- 取消：{cancelled}
 """
 
         try:
@@ -581,8 +572,9 @@ class PlanHandler:
         if conversation_id:
             unregister_active_todo(conversation_id)
             self._store.remove(conversation_id)
+            self._store.save()
 
-        return f"✅ 计划 {plan_id} 已完成\n\n{complete_message}"
+        return f"计划 {plan_id} 已结束\n\n{complete_message}"
 
     async def _create_plan_file(self, params: dict) -> str:
         """创建 Cursor 风格的 .plan.md 文件（YAML frontmatter + Markdown body）。
@@ -908,9 +900,9 @@ class PlanHandler:
 
     def get_plan_prompt_section(self, conversation_id: str = "") -> str:
         """
-        生成注入 system_prompt 的计划摘要段落。
+        生成用于持久状态事件的确定性计划摘要。
 
-        该段落放在 system_prompt 中，不随 working_messages 压缩而丢失，
+        该段落由模型 transcript 版本化保存，压缩后恢复最新状态，
         确保 LLM 在任何时候都能看到完整的计划结构和最新进度。
 
         Args:
@@ -924,11 +916,38 @@ class PlanHandler:
             return ""
         steps = plan["steps"]
         total = len(steps)
-        completed = sum(1 for s in steps if s["status"] in ("completed", "failed", "skipped"))
+        from ...runtime.context.continuity import content_digest
 
+        categories = ("completed", "failed", "skipped", "cancelled", "pending", "in_progress")
+        counts = {
+            status: sum(step.get("status") == status for step in steps) for status in categories
+        }
+        digest = content_digest(
+            {
+                "id": plan["id"],
+                "status": plan.get("status"),
+                "steps": [
+                    {
+                        key: step.get(key)
+                        for key in (
+                            "id",
+                            "description",
+                            "status",
+                            "result",
+                            "started_at",
+                            "completed_at",
+                            "skills",
+                        )
+                    }
+                    for step in steps
+                ],
+            }
+        )
         lines = [
             f"## Active Plan: {plan['task_summary']}  (id: {plan['id']})",
-            f"Progress: {completed}/{total} done",
+            "Reported step states (not independent verification): "
+            + ", ".join(f"{key}={value}" for key, value in counts.items()),
+            f"State digest: {digest[:16]}",
             "",
         ]
 
@@ -976,18 +995,8 @@ class PlanHandler:
             )
 
         for step in steps:
-            if step["status"] == "in_progress" and step.get("started_at"):
-                try:
-                    started = datetime.fromisoformat(step["started_at"])
-                    elapsed = (datetime.now() - started).total_seconds()
-                    if elapsed > 300:
-                        mins = int(elapsed / 60)
-                        lines.append(
-                            f"\n⚠️ STALE: Step '{step['id']}' has been in_progress for {mins} min. "
-                            "Consider completing, failing, or skipping it."
-                        )
-                except (ValueError, TypeError):
-                    pass
+            if step.get("status") == "in_progress" and step.get("started_at"):
+                lines.append(f"Step {step['id']} started_at: {step['started_at']} (recorded time)")
 
         return "\n".join(lines)
 

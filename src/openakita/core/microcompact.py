@@ -2,10 +2,9 @@
 Microcompact — 请求前轻量上下文清理
 
 零 LLM 调用成本的上下文瘦身策略，在发送 API 请求前执行:
-1. 过期工具结果清空（按时间阈值）
-2. 大工具结果替换为摘要预览
+1. 完整相同工具调用及结果引用去重
+2. 保留输出回读引用，不按年龄删除证据
 3. 旧 thinking 块移除
-4. 旧 tool_use 参数裁剪
 
 参考 Claude Code 的 microcompact 策略。
 """
@@ -13,8 +12,8 @@ Microcompact — 请求前轻量上下文清理
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +45,16 @@ def microcompact(
     Returns:
         清理后的消息列表（原地修改）
     """
-    now = current_time or time.time()
     cleaned = 0
     total_messages = len(messages)
-    seen_cache_refs: set[str] = set()
-    seen_tool_fingerprints: dict[str, int] = {}
+    seen_tool_fingerprints: dict[str, str] = {}
+    tool_calls = {
+        b.get("id"): (b.get("name"), b.get("input"))
+        for m in messages
+        if isinstance(m.get("content"), list)
+        for b in m["content"]
+        if isinstance(b, dict) and b.get("type") == "tool_use"
+    }
 
     for i, msg in enumerate(messages):
         # Only process messages not in the last 3 (keep recent context intact)
@@ -68,55 +72,28 @@ def microcompact(
 
             if block_type == "tool_result" and not is_recent:
                 result_content = block.get("content", "")
-                cache_key = str(block.get("cache_key", "") or "")
-                if (
-                    not cache_key
-                    and isinstance(result_content, str)
-                    and result_content.startswith("[系统缓存:")
-                ):
-                    cache_key = result_content.split("]", 1)[0]
-                if cache_key:
-                    if cache_key in seen_cache_refs:
-                        block["content"] = f"[cached tool result duplicate merged: {cache_key}]"
-                        cleaned += 1
-                        continue
-                    seen_cache_refs.add(cache_key)
-
-                tool_name = str(block.get("tool_name", "") or "")
-                if isinstance(result_content, str) and result_content:
-                    fp = hashlib.md5(
-                        result_content[:4000].encode("utf-8", errors="ignore")
-                    ).hexdigest()[:12]
-                    semantic_key = f"{tool_name}:{fp}"
-                    previous = seen_tool_fingerprints.get(semantic_key, 0)
-                    if previous >= 1:
+                # Only byte-identical results of identical calls may share a reference.
+                # Existing overflow previews are already bounded and must keep their refs.
+                identity = tool_calls.get(block.get("tool_use_id"))
+                if identity and isinstance(result_content, str) and result_content:
+                    fingerprint = hashlib.sha256(
+                        json.dumps(
+                            [identity, bool(block.get("is_error")), result_content],
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ).encode()
+                    ).hexdigest()
+                    previous = seen_tool_fingerprints.get(fingerprint)
+                    if previous and block.get("_cold_output_ref"):
                         block["content"] = (
-                            f"[tool result merged] 重复/相似的 {tool_name or 'tool'} 结果已合并；"
-                            f"保留最近结果，历史副本 fingerprint={fp}。"
+                            f"[identical tool result: see tool_use_id={previous}; "
+                            f"sha256={fingerprint}; "
+                            f"read_file(path=memory://tool-output/{block['_cold_output_ref']})]"
                         )
                         cleaned += 1
-                        continue
-                    seen_tool_fingerprints[semantic_key] = previous + 1
-
-            # 1. Clear expired tool results (except recent ones)
-            if block_type == "tool_result" and not is_recent:
-                ts = block.get("_timestamp", 0)
-                if ts > 0 and (now - ts) > tool_result_expiry_s:
-                    original_content = block.get("content", "")
-                    if isinstance(original_content, str) and len(original_content) > 100:
-                        block["content"] = "[expired tool result]"
-                        cleaned += 1
-
-            # 2. Truncate large tool results to preview
-            if block_type == "tool_result" and not is_recent:
-                result_content = block.get("content", "")
-                if isinstance(result_content, str) and len(result_content) > large_result_threshold:
-                    preview = result_content[:preview_chars]
-                    total = len(result_content)
-                    block["content"] = (
-                        f"{preview}\n\n... [{total} chars total, truncated by microcompact]"
-                    )
-                    cleaned += 1
+                    else:
+                        seen_tool_fingerprints[fingerprint] = block.get("tool_use_id", "")
+                # Do not expire or cut evidence without a durable, readable replacement.
 
             # 3. Remove old thinking blocks (except last 2 messages)
             if block_type in ("thinking", "redacted_thinking") and not is_recent:
@@ -182,17 +159,6 @@ def _group_messages(messages: list[dict]) -> list[list[dict]]:
 
     每组以 user 消息开始，包含紧随的 assistant 消息和相关 tool_result。
     """
-    groups: list[list[dict]] = []
-    current: list[dict] = []
+    from ._context_runtime import ContextManager
 
-    for msg in messages:
-        role = msg.get("role", "")
-        if role == "user" and current:
-            groups.append(current)
-            current = []
-        current.append(msg)
-
-    if current:
-        groups.append(current)
-
-    return groups
+    return ContextManager.group_messages(messages)

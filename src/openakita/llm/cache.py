@@ -28,7 +28,7 @@ def build_cached_system_blocks(system_prompt: str) -> list[dict]:
     """将系统提示拆分为静态/动态部分并添加 cache_control。
 
     如果系统提示包含 DYNAMIC_BOUNDARY 标记，则标记之前的部分为静态缓存。
-    否则整个提示都标记为缓存。
+    没有显式标记时兼容旧 Developer 分隔符，否则整个提示都标记为缓存。
 
     Returns:
         Anthropic 格式的 system blocks 列表
@@ -36,10 +36,13 @@ def build_cached_system_blocks(system_prompt: str) -> list[dict]:
     if not system_prompt:
         return []
 
-    if SYSTEM_PROMPT_DYNAMIC_BOUNDARY in system_prompt:
-        parts = system_prompt.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY, 1)
+    boundary = SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+    legacy_boundary = "\n\n---\n\n## Developer"
+    if boundary in system_prompt or legacy_boundary in system_prompt:
+        explicit = boundary in system_prompt
+        parts = system_prompt.split(boundary if explicit else legacy_boundary, 1)
         static_part = parts[0].strip()
-        dynamic_part = parts[1].strip() if len(parts) > 1 else ""
+        dynamic_part = parts[1].strip() if explicit else legacy_boundary + parts[1]
 
         blocks = []
         if static_part:

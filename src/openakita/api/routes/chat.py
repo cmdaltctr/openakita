@@ -312,9 +312,9 @@ def _complete_active_todo_after_final_answer(
         seed_snapshot = serialize_plan_to_chat_todo(plan) if isinstance(plan, dict) else None
 
         if not complete_todo_after_final_answer(conversation_id):
-            return todo_snapshot, next_events
+            return seed_snapshot or todo_snapshot, next_events
 
-        next_snapshot = todo_snapshot or seed_snapshot
+        next_snapshot = serialize_plan_to_chat_todo(plan) or seed_snapshot or todo_snapshot
         event_plan_id = plan_id or (seed_snapshot or {}).get("id") or ""
         already_completed = any(
             ev.get("type") == "todo_completed"

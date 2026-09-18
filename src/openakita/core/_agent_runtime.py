@@ -19,6 +19,7 @@ import asyncio
 import base64
 import contextlib
 import contextvars
+import copy
 import json
 import logging
 import os
@@ -3739,6 +3740,15 @@ class Agent:
         session: object | None = None,
     ) -> list[dict]:
         """Compress session history during prepare without reusing stale cancel signals."""
+        from ..sessions.manager import SessionManager
+
+        if await SessionManager.has_model_transcript(
+            data_dir=settings.data_dir,
+            conversation_id=conversation_id,
+            session=session,
+            profile=str(getattr(getattr(session, "context", None), "agent_profile_id", "default")),
+        ):
+            return messages
         active_task = None
         if self.agent_state:
             active_task = self.agent_state.get_task_for_session(session_id)
@@ -4884,11 +4894,11 @@ class Agent:
                 )
                 if checkpoint and profile_matches and source_matches:
                     history_messages = session_messages[source_count:]
-                    checkpoint_seed = list(checkpoint.get("projected_messages") or [])
+                    checkpoint_seed = copy.deepcopy(checkpoint.get("projected_messages") or [])
                     if not checkpoint_seed:
                         checkpoint_seed = self.context_manager._inject_summary_into_recent(
                             str(checkpoint.get("summary") or ""),
-                            list(checkpoint.get("recent_messages") or []),
+                            copy.deepcopy(checkpoint.get("recent_messages") or []),
                         )
                     logger.info(
                         "[Session:%s] Applied durable compaction checkpoint %s",
@@ -4972,7 +4982,7 @@ class Agent:
                 if isinstance(content, str) and not _RE_TIME_PREFIX.match(content):
                     # 给每条历史消息补 [HH:MM] 时间戳。
                     # ts 可能缺失（旧消息 / 外部注入），此时用 message["created_at"]
-                    # / 兜底"now"，确保每条历史都有可读时间锚点。
+                    # / 保持时间未知；不能用当前时间伪造旧消息的时间锚点。
                     fallback_ts = msg.get("created_at") or msg.get("ts") or ""
                     raw_ts = ts or fallback_ts
                     t_obj = None
@@ -4981,9 +4991,8 @@ class Agent:
                             t_obj = datetime.fromisoformat(str(raw_ts))
                         except Exception:
                             t_obj = None
-                    if t_obj is None:
-                        t_obj = datetime.now()
-                    content = f"[{t_obj.strftime('%H:%M')}] " + content
+                    if t_obj is not None:
+                        content = f"[{t_obj.strftime('%H:%M')}] " + content
                 if messages and messages[-1]["role"] == role:
                     messages[-1]["content"] += "\n" + content
                 else:
@@ -5207,17 +5216,8 @@ class Agent:
         if isinstance(compiled_message, str):
             compiled_message = current_turn.inject_into_message(compiled_message)
 
-        # === 角色交替保护 ===
-        # 如果历史末尾是 user 消息（通常由上下文边界标记产生），
-        # 将其文本合并到当前消息前缀，避免连续同角色消息导致 API 错误或模型混乱
-        if messages and messages[-1]["role"] == "user":
-            _trailing_user = messages.pop()
-            _trailing_text = _trailing_user.get("content", "")
-            if isinstance(_trailing_text, str) and _trailing_text:
-                compiled_message = _trailing_text + "\n" + compiled_message
-            elif _trailing_text:
-                # 非字符串内容（如多模态 list），无法文本合并，恢复原位
-                messages.append(_trailing_user)
+        # Keep the new input separate: prior users already belong to the durable
+        # model history, including turns interrupted before an assistant reply.
 
         # Desktop Chat 附件处理（与 IM 的 pending_images 对齐）
         if attachments and not pending_images:
@@ -5436,6 +5436,28 @@ class Agent:
         else:
             # 普通文本消息
             messages.append({"role": "user", "content": compiled_message})
+
+        # Bind retries to the human input, not changing replay labels or lifecycle hints.
+        import hashlib
+
+        _admission_content = messages[-1].get("content") if messages else None
+        _admission_media = (
+            [
+                part
+                for part in _admission_content
+                if isinstance(part, dict) and part.get("type") != "text"
+            ]
+            if isinstance(_admission_content, list)
+            else []
+        )
+        if messages:
+            messages[-1]["_model_input_hash"] = hashlib.sha256(
+                json.dumps(
+                    {"text": message, "media": _admission_media},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
 
         # 10.5. Record incoming attachments (images/videos/files) to memory
         self._record_inbound_attachments(
@@ -7492,6 +7514,7 @@ class Agent:
             base_system_prompt=base_system_prompt,
             task_description=task_description,
             task_monitor=task_monitor,
+            session=session or self._current_session,
             session_type=session_type,
             conversation_id=conversation_id,
             thinking_mode=thinking_mode,

@@ -41,6 +41,13 @@ from openakita.agent.resource_budget import (
 from ..api.routes.websocket import broadcast_event
 from ..config import settings
 from ..llm.converters.tools import PARSE_ERROR_KEY
+from ..prompt.turn_context import extract_context
+from ..sessions.model_transcript import (
+    active_transcript,
+    commit_model_messages,
+    is_human_message,
+    record_model_tool_result,
+)
 from ..tools.tool_hints import ConfigHint
 from ..tools.tool_result import split_tool_result_payload
 from ..tracing.tracer import get_tracer
@@ -372,6 +379,7 @@ async def _execute_riskgate_tool_confirmation(
         unpack_tool_result=_unpack_tool_result_payload,
         tool_result_looks_error=_tool_result_looks_error,
     )
+    await record_model_tool_result(confirmation.tool_id, outcome.result_text, outcome.is_error)
     result_summary = summarize_tool_result(confirmation.tool_name, outcome.result_text) or ""
     end_events = _build_tool_end_events(
         tool_name=confirmation.tool_name,
@@ -1076,6 +1084,9 @@ class ReasoningEngine:
         tokens: int,
     ) -> None:
         """Shrink large tool payloads after a token spike to avoid replay storms."""
+        if active_transcript.get() is not None:
+            # Durable history changes only through the validated compression pipeline.
+            return
         anomaly_threshold = int(
             getattr(settings, "context_token_anomaly_threshold", TOKEN_ANOMALY_THRESHOLD)
             or TOKEN_ANOMALY_THRESHOLD
@@ -1346,6 +1357,9 @@ class ReasoningEngine:
         is_sub_agent: bool = False,
         mode: str = "agent",
         agent_voice: str = "",
+        session: Any = None,
+        request_id: str = "",
+        turn_id: str = "",
     ) -> str:
         """Consume the canonical event-stream loop and aggregate its final text."""
         del interrupt_check_fn  # Kept in the public signature for compatibility.
@@ -1372,6 +1386,9 @@ class ReasoningEngine:
             tool_evidence_required=tool_evidence_required,
             is_sub_agent=is_sub_agent,
             agent_voice=agent_voice,
+            session=session,
+            request_id=request_id,
+            turn_id=turn_id,
         ):
             event_type = event.get("type")
             content = str(event.get("content") or "")
@@ -1403,7 +1420,127 @@ class ReasoningEngine:
 
     # ==================== 流式输出 (SSE) ====================
 
-    async def reason_stream(
+    async def _sync_plan_context(self, messages: list[dict], conversation_id: str | None) -> None:
+        """Sample plan state at a safe tool-batch boundary, never rewrite system/history."""
+        if not conversation_id:
+            return
+        from ..tools.handlers.plan import get_active_todo_prompt
+
+        try:
+            payload = get_active_todo_prompt(conversation_id)
+        except Exception:
+            logger.warning("Plan state is temporarily unavailable", exc_info=True)
+            payload = None
+        transcript = active_transcript.get()
+        if transcript is not None:
+            await transcript.update_context(messages, "active_plan", payload)
+            return
+        # Compatibility for direct engine callers without a durable session.
+        from ..sessions.model_transcript import _context_message
+
+        old = next(
+            (
+                m.get("_model_context", {})
+                for m in reversed(messages)
+                if m.get("_model_context", {}).get("key") == "active_plan"
+            ),
+            {},
+        )
+        if old.get("payload", "") != payload:
+            messages.append(
+                _context_message("active_plan", payload, "session", old.get("version", 0) + 1)
+            )
+
+    async def reason_stream(self, messages: list[dict], **kwargs):
+        """Admit once, then replay committed model messages across normal turns and restarts."""
+        conversation_id = kwargs.get("conversation_id")
+        session = kwargs.get("session")
+        if session is None:
+            agent = getattr(getattr(self, "_tool_executor", None), "_agent_ref", None)
+            session = getattr(agent, "_current_session", None)
+        from ..sessions.manager import SessionManager
+
+        transcript = await SessionManager.open_model_transcript(
+            data_dir=settings.data_dir,
+            conversation_id=conversation_id,
+            profile=kwargs.get("agent_profile_id", "default"),
+            session=session,
+            sub_agent=kwargs.get("is_sub_agent", False),
+        )
+        token = active_transcript.set(transcript)
+        self._last_working_messages = []
+        driver = None
+        try:
+            system, sections, sampled_time = extract_context(
+                kwargs.get("base_system_prompt") or kwargs.get("system_prompt", "")
+            )
+            kwargs["base_system_prompt"] = system
+            kwargs["system_prompt"] = extract_context(kwargs.get("system_prompt", ""))[0]
+            turn_id = kwargs.get("turn_id") or kwargs.get("request_id") or uuid.uuid4().hex
+            kwargs["turn_id"] = turn_id
+            resumed = None
+            if transcript.revision == 0:
+                resumed = self._maybe_load_resume_working_messages(
+                    messages, conversation_id, kwargs.get("is_sub_agent", False), consume=False
+                )
+                if resumed is not None:
+                    messages = resumed
+            admitted = await transcript.admit(messages, sections, sampled_time, turn_id)
+            if resumed is not None:
+                # Keep the legacy snapshot until its replacement is durably committed.
+                clear_persisted_working_messages(conversation_id, base_dir=settings.data_dir)
+            if turn_id in transcript.completed_turns:
+                self._last_working_messages = copy.deepcopy(admitted)
+                self._last_exit_reason = transcript.completed_exit_reasons[turn_id]
+                self._last_react_trace = []
+                self._last_delivery_receipts = []
+                for event in transcript.completed_turns[turn_id]:
+                    yield copy.deepcopy(event)
+                return
+            displayed = ""
+            question_event = None
+            failed = False
+            driver = self._reason_stream_with_state(admitted, **kwargs)
+            async for event in driver:
+                if event.get("type") not in (
+                    "text_delta",
+                    "thinking_delta",
+                    "reasoning_delta",
+                    "heartbeat",
+                ):
+                    working = transcript.working_messages or self._last_working_messages
+                    if working:
+                        await transcript.sync(working)
+                event_type = event.get("type")
+                if event_type == "text_delta":
+                    displayed += event.get("content", "")
+                elif event_type == "text_replace":
+                    displayed = event.get("content", "")
+                elif event_type == "ask_user":
+                    question_event = copy.deepcopy(event)
+                elif event_type == "error":
+                    failed = True
+                elif event_type == "done" and not failed:
+                    replay = [{"type": "text_delta", "content": displayed}] if displayed else []
+                    if question_event:
+                        replay.append(question_event)
+                    await transcript.complete_turn(
+                        [*replay, {"type": "done"}],
+                        exit_reason=getattr(self, "_last_exit_reason", "normal"),
+                    )
+                yield event
+        finally:
+            try:
+                if driver is not None:
+                    await driver.aclose()
+                working = transcript.working_messages or self._last_working_messages
+                if working:
+                    await transcript.sync(working)
+            finally:
+                active_transcript.reset(token)
+                transcript.close()
+
+    async def _reason_stream_with_state(
         self,
         messages: list[dict],
         *,
@@ -1454,8 +1591,9 @@ class ReasoningEngine:
             except Exception:
                 logger.debug("[ReAct-Stream] sub-agent AbortScope attach failed", exc_info=True)
 
+        impl_stream = None
         try:
-            async for event in self._reason_stream_impl(
+            impl_stream = self._reason_stream_impl(
                 messages,
                 tools=tools,
                 system_prompt=system_prompt,
@@ -1479,7 +1617,8 @@ class ReasoningEngine:
                 turn_id=turn_id,
                 agent_voice=agent_voice,
                 _on_state_resolved=_on_state_resolved,
-            ):
+            )
+            async for event in impl_stream:
                 _event_type = event.get("type") if isinstance(event, dict) else ""
                 if _event_type == "done":
                     _stream_done_seen = True
@@ -1516,6 +1655,8 @@ class ReasoningEngine:
                                 )
                 yield event
         finally:
+            if impl_stream is not None:
+                await impl_stream.aclose()
             st = captured_state_ref.get("state")
             _exit_reason = _stream_exit_reason or getattr(self, "_last_exit_reason", "") or ""
             if not _stream_done_seen and _exit_reason in ("", "normal"):
@@ -1669,17 +1810,7 @@ class ReasoningEngine:
             def _build_effective_prompt() -> str:
                 if getattr(state, "_content_safety_minimal_prompt", False):
                     return _CONTENT_SAFETY_MINIMAL_PROMPT_STREAM
-                try:
-                    from ..tools.handlers.plan import get_active_todo_prompt
-
-                    prompt = _base_sp
-                    if conversation_id:
-                        plan_section = get_active_todo_prompt(conversation_id)
-                        if plan_section:
-                            prompt += f"\n\n{plan_section}\n"
-                    return prompt
-                except Exception:
-                    return _base_sp
+                return _base_sp
 
             effective_prompt = _build_effective_prompt()
 
@@ -1761,10 +1892,15 @@ class ReasoningEngine:
             # Issue #608: resume the previous cancelled turn's persisted
             # structured working_messages instead of replaying flattened text
             # history; falls back to text history when nothing was persisted.
-            _resumed_wm_s = self._maybe_load_resume_working_messages(
-                messages, conversation_id, is_sub_agent
+            _resumed_wm_s = (
+                None
+                if active_transcript.get() is not None
+                else self._maybe_load_resume_working_messages(
+                    messages, conversation_id, is_sub_agent
+                )
             )
             working_messages = _resumed_wm_s if _resumed_wm_s is not None else list(messages)
+            await commit_model_messages(working_messages)
 
             # Repair orphan ``tool_use`` blocks at turn start (cancelled mid-tool
             # snapshots) so the next LLM call is Anthropic-well-formed.
@@ -2058,8 +2194,12 @@ class ReasoningEngine:
 
                 _ctx_compressed_info: dict | None = None
                 effective_prompt = _build_effective_prompt()
+                await self._sync_plan_context(working_messages, conversation_id)
                 if len(working_messages) > 2:
-                    working_messages = self._context_manager.pre_request_cleanup(working_messages)
+                    if active_transcript.get() is None:
+                        working_messages = self._context_manager.pre_request_cleanup(
+                            working_messages
+                        )
                     _before_tokens = self._context_manager.estimate_messages_tokens(
                         working_messages
                     )
@@ -2112,6 +2252,18 @@ class ReasoningEngine:
                             scratchpad_summary=_scratchpad,
                             completed_tools=executed_tool_names,
                             task_description=task_description,
+                        )
+                        transcript = active_transcript.get()
+                        if transcript is not None:
+                            working_messages = transcript.retain_context(working_messages)
+                        self._context_manager.validate_projection(
+                            working_messages,
+                            system_prompt=effective_prompt,
+                            tools=tools,
+                            conversation_id=conversation_id,
+                        )
+                        _after_tokens = self._context_manager.estimate_messages_tokens(
+                            working_messages
                         )
                         _ctx_compressed_info = {
                             "before_tokens": _before_tokens,
@@ -2212,6 +2364,7 @@ class ReasoningEngine:
                                 len(tools),
                             )
 
+                await commit_model_messages(working_messages)
                 # --- Reason phase (真流式) ---
                 _thinking_t0 = time.time()
                 yield {"type": "thinking_start"}
@@ -2785,6 +2938,16 @@ class ReasoningEngine:
                             )
                             react_trace.append(_iter_trace)
                             continue
+                        working_messages.append(
+                            {
+                                "role": "assistant",
+                                "content": decision.assistant_content
+                                or decision.text_content
+                                or result,
+                                "reasoning_content": decision.thinking_content or None,
+                            }
+                        )
+                        await commit_model_messages(working_messages)
                         react_trace.append(_iter_trace)
                         final_exit_reason = self._last_exit_reason
                         is_verify_incomplete = final_exit_reason == "verify_incomplete"
@@ -2870,6 +3033,8 @@ class ReasoningEngine:
                             "reasoning_content": decision.thinking_content or None,
                         }
                     )
+
+                    await commit_model_messages(working_messages)
 
                     # ---- ask_user 拦截 ----
                     ask_user_calls = [
@@ -3178,6 +3343,7 @@ class ReasoningEngine:
                                         ),
                                     }
                                 )
+                            await record_model_tool_result(t_id, r, _tool_is_error)
                             tool_results_for_msg.append(_tool_result_msg)
                             if _deferred_tool_result:
                                 raise DeferredApprovalRequired(
@@ -3664,6 +3830,7 @@ class ReasoningEngine:
                                     "不要再执行该操作，请选择安全替代方案或说明无法继续。"
                                 )
                                 _confirm_is_error = True
+                            await record_model_tool_result(tool_id, result_text, _confirm_is_error)
                             for _evt in _build_tool_end_events(
                                 tool_name=tool_name,
                                 tool_id=tool_id,
@@ -3764,6 +3931,7 @@ class ReasoningEngine:
                             result_text = f"Tool error: {exc}"
 
                         _tool_is_error = result_text.startswith("Tool error:")
+                        await record_model_tool_result(tool_id, result_text, _tool_is_error)
                         # Emit agent_handoff events from session.context.handoff_events (set by orchestrator.delegate)
                         if (
                             session
@@ -5199,10 +5367,16 @@ class ReasoningEngine:
         if self._plugin_hooks:
             try:
                 hook_results = await self._plugin_hooks.dispatch(
-                    "on_before_llm_call", messages=messages, tools=tools
+                    "on_before_llm_call",
+                    messages=copy.deepcopy(messages),
+                    tools=copy.deepcopy(tools),
                 )
                 extra_parts = [r for r in hook_results if isinstance(r, str) and r.strip()]
-                if extra_parts and messages:
+                if active_transcript.get() is not None:
+                    await active_transcript.get().update_context(
+                        messages, "plugin_context", "\n".join(extra_parts)
+                    )
+                elif extra_parts and messages:
                     # #581 (upstream 86914fc2): list-shaped (multimodal) user
                     # messages previously fell through silently, dropping plugin
                     # context whenever the turn had attachments. Append a text
@@ -5219,6 +5393,7 @@ class ReasoningEngine:
             except Exception as _hook_err:
                 logger.debug(f"on_before_llm_call hook error (ignored): {_hook_err}")
 
+        await commit_model_messages(messages)
         tracer = get_tracer()
         with tracer.llm_span(model=current_model) as span:
             async for raw_event in self._brain.messages_create_stream(
@@ -5248,6 +5423,14 @@ class ReasoningEngine:
                     continue
 
                 for high_event in acc.feed(raw_event):
+                    transcript = active_transcript.get()
+                    if transcript is not None and high_event.get("type") in (
+                        "text_delta",
+                        "thinking_delta",
+                        "reasoning_delta",
+                    ):
+                        kind = "text" if high_event["type"] == "text_delta" else "thinking"
+                        await transcript.record_frame(kind, high_event.get("content", ""))
                     yield high_event
                     last_yield_time = _time.monotonic()
 
@@ -5416,6 +5599,7 @@ class ReasoningEngine:
                 )
             )
             try:
+                await commit_model_messages(messages)
                 response = await self._brain.messages_create_async(
                     use_thinking=use_thinking,
                     thinking_depth=thinking_depth,
@@ -6201,19 +6385,13 @@ class ReasoningEngine:
                     effective_max_no_tool_retries,
                 )
 
-            logger.warning(
-                "[IntentTag] ACTION retry budget exhausted without tool calls"
-            )
+            logger.warning("[IntentTag] ACTION retry budget exhausted without tool calls")
             return (
                 "本轮标记为 [ACTION]，但没有产生任何工具调用结果。"
                 "请重试，或允许我调用所需工具后再继续。"
             )
 
-        if (
-            intent is None
-            and _txt
-            and not tool_evidence_required
-        ):
+        if intent is None and _txt and not tool_evidence_required:
             logger.info(
                 f"[IntentTag] No intent tag but visible text "
                 f"({len(_txt)} chars), accepting as implicit REPLY"
@@ -6615,6 +6793,39 @@ class ReasoningEngine:
         if not task_monitor:
             return None
 
+        if active_transcript.get() is not None and any(
+            pattern in str(error).lower()
+            for pattern in (
+                "context window",
+                "context length",
+                "context_length_exceeded",
+                "too many tokens",
+                "token limit",
+                "payload",
+                "(413)",
+                "input too long",
+            )
+        ):
+            if getattr(state, "_durable_overflow_retried", False):
+                return None
+            state._durable_overflow_retried = True
+            try:
+                candidate = await self._context_manager.reactive_compact(
+                    working_messages,
+                    system_prompt=getattr(state, "_system_prompt", ""),
+                    memory_manager=self._memory_manager,
+                    conversation_id=getattr(state, "session_id", None),
+                )
+            except _CtxCancelledError:
+                raise
+            except Exception:
+                logger.warning("Durable context recovery failed; refusing destructive fallback")
+                return None
+            if candidate == working_messages:
+                return None
+            working_messages[:] = candidate
+            return "retry"
+
         # ── 全局重试计数器（跨模型切换） ──
         # 无论错误类型，总重试次数达到上限即终止并告知用户。
         total_retries = getattr(state, "_total_llm_retries", 0) + 1
@@ -6946,6 +7157,8 @@ class ReasoningEngine:
         仅当含真实工具块时才落盘，避免无意义旁路文件。任何异常都吞掉——持久化
         失败不应影响当前退出路径本身。
         """
+        if active_transcript.get() is not None:
+            return  # The model transcript owns normal and interrupted history alike.
         try:
             conversation_id = getattr(state, "session_id", "") if state else ""
             is_sub_agent = bool(getattr(state, "is_sub_agent", False)) if state else False
@@ -7068,6 +7281,8 @@ class ReasoningEngine:
         messages: list[dict],
         conversation_id: str | None,
         is_sub_agent: bool,
+        *,
+        consume: bool = True,
     ) -> list[dict] | None:
         """续聊入口尝试恢复上一轮取消时持久化的 working_messages（Issue #608）。
 
@@ -7090,7 +7305,7 @@ class ReasoningEngine:
                 conversation_id,
                 base_dir=settings.data_dir,
                 ttl_seconds=DEFAULT_TTL_SECONDS,
-                consume=True,
+                consume=consume,
             )
             if not loaded:
                 return None
@@ -7112,6 +7327,7 @@ class ReasoningEngine:
                 merged.append(
                     {
                         "role": "user",
+                        "_model_source": "resume_hint",
                         "content": (
                             "[系统提示] 上一轮任务被中断，以上工具调用与结果是上一轮已真实"
                             "执行完成的进度（尚未写入可见对话）。如果当前消息是要继续该任务，"
@@ -7140,6 +7356,8 @@ class ReasoningEngine:
     @staticmethod
     def _is_human_user_message(msg: dict) -> bool:
         """判断是否为人类用户消息（排除 tool_result）"""
+        if not is_human_message(msg):
+            return False
         if msg.get("role") != "user":
             return False
         content = msg.get("content")

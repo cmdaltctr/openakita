@@ -15,6 +15,7 @@ from ..cache import (
     add_tools_cache_control,
     sort_tools_for_cache_stability,
 )
+from ..converters.messages import prepare_turn_context
 from ..converters.tools import (
     convert_tools_to_anthropic,
     has_text_tool_calls,
@@ -302,23 +303,10 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _build_system_blocks(system: str) -> list[dict]:
-        """Split system prompt into static + dynamic blocks for Anthropic prompt caching.
+        """Use the shared boundary contract, with capability gating at the caller."""
+        from ..cache import build_cached_system_blocks
 
-        Uses the '## Developer' section boundary as the split point.
-        The static part (System section) gets cache_control to enable
-        cross-turn prompt caching, reducing token costs significantly.
-        """
-        _BOUNDARY = "\n\n---\n\n## Developer"
-        idx = system.find(_BOUNDARY)
-        if idx == -1:
-            return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
-        static_part = system[:idx]
-        dynamic_part = system[idx:]
-        blocks = [
-            {"type": "text", "text": static_part, "cache_control": {"type": "ephemeral"}},
-            {"type": "text", "text": dynamic_part},
-        ]
-        return blocks
+        return build_cached_system_blocks(system)
 
     def _build_request_body(self, request: LLMRequest) -> dict:
         """构建请求体。
@@ -326,7 +314,8 @@ class AnthropicProvider(LLMProvider):
         增强: 使用模型注册表查询能力，支持 Prompt Cache。
         """
         thinking_enabled = request.enable_thinking and self.config.has_capability("thinking")
-        messages = self._serialize_messages(request.messages, thinking_enabled)
+        context_messages, system = prepare_turn_context(request.messages, request.system)
+        messages = self._serialize_messages(context_messages, thinking_enabled)
 
         # 使用模型注册表查询 max_tokens，替代硬编码
         caps = get_model_capabilities(self.config.model)
@@ -339,11 +328,11 @@ class AnthropicProvider(LLMProvider):
         }
 
         # 系统提示: 分段缓存 (静态部分标记 cache_control)
-        if request.system:
+        if system:
             if caps.supports_cache:
-                body["system"] = self._build_system_blocks(request.system)
+                body["system"] = self._build_system_blocks(system)
             else:
-                body["system"] = request.system
+                body["system"] = system
 
         # 工具 schema: 排序 + 缓存标记
         if request.tools:
@@ -395,6 +384,9 @@ class AnthropicProvider(LLMProvider):
             else:
                 body.pop("thinking_depth", None)
 
+        from ..request_budget import validate_request_body
+
+        validate_request_body(body, self.config)
         return body
 
     @staticmethod

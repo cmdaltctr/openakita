@@ -75,6 +75,64 @@ class SessionManager:
     - 会话持久化
     """
 
+    @staticmethod
+    async def has_model_transcript(*, data_dir, conversation_id, session=None, profile="default"):
+        """Read-only presence check; preparation must not compress a discarded UI projection."""
+        import sqlite3
+
+        from .model_transcript import new_stream_id
+
+        path = Path(data_dir) / "model-transcripts.sqlite3"
+        if not conversation_id or not path.exists():
+            return False
+        variables = getattr(getattr(session, "context", None), "variables", {})
+        reset = variables.get("_context_reset_at", "") if isinstance(variables, dict) else ""
+        identity = getattr(session, "id", "")
+        if isinstance(identity, str) and identity:
+            reset = f"{identity}:{reset}"
+        stream = new_stream_id(conversation_id, profile, reset, False)
+
+        def exists():
+            with contextlib.closing(
+                sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+            ) as db:
+                if not db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='model_events'"
+                ).fetchone():
+                    return False
+                return (
+                    db.execute(
+                        "SELECT 1 FROM model_events WHERE stream=? LIMIT 1", (stream,)
+                    ).fetchone()
+                    is not None
+                )
+
+        return await asyncio.to_thread(exists)
+
+    @staticmethod
+    async def open_model_transcript(
+        *,
+        data_dir: Path,
+        conversation_id: str | None,
+        profile: str = "default",
+        session: Session | None = None,
+        sub_agent: bool = False,
+    ):
+        """Acquire the session's model-history writer, separate from UI persistence."""
+        from .model_transcript import ModelTranscript, new_stream_id
+
+        variables = getattr(getattr(session, "context", None), "variables", {})
+        reset = variables.get("_context_reset_at", "") if isinstance(variables, dict) else ""
+        session_identity = getattr(session, "id", "")
+        if isinstance(session_identity, str) and session_identity:
+            reset = f"{session_identity}:{reset}"
+        stream = new_stream_id(conversation_id, profile, reset, sub_agent)
+        transcript = ModelTranscript(
+            Path(data_dir) / "model-transcripts.sqlite3" if conversation_id else None, stream
+        )
+        await transcript.open()
+        return transcript
+
     def __init__(
         self,
         storage_path: Path | None = None,

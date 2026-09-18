@@ -180,7 +180,7 @@ def test_loop_budget_treats_network_reads_as_readonly_stagnation():
         assert stop.exit_reason == "readonly_stagnation"
 
 
-def test_microcompact_dedupes_cached_and_repeated_tool_results():
+def test_microcompact_preserves_cached_results_without_verified_call_identity():
     messages = [
         {
             "role": "user",
@@ -212,7 +212,7 @@ def test_microcompact_dedupes_cached_and_repeated_tool_results():
     ]
 
     compacted = microcompact(messages, current_time=1)
-    assert "duplicate merged" in compacted[1]["content"][0]["content"]
+    assert compacted[1]["content"][0]["content"] == "[系统缓存:abc] cached summary"
 
 
 def test_token_anomaly_compaction_uses_configured_summary_chars(monkeypatch):

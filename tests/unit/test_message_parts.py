@@ -165,7 +165,22 @@ def test_progress_event_journal_projects_latest_todo_state():
     assert todo["steps"][1]["result"] == "built"
 
 
-def test_progress_completion_terminalizes_pending_steps():
+def test_progress_retry_reopens_failed_plan():
+    events = append_progress_event([], {"type": "todo_created", "plan": _plan()})
+    events = append_progress_event(
+        events, {"type": "todo_step_updated", "step_id": "s2", "status": "failed"}
+    )
+    assert project_progress_events_to_todo(events)["status"] == "failed"
+    events = append_progress_event(
+        events, {"type": "todo_step_updated", "step_id": "s2", "status": "in_progress"}
+    )
+    todo = project_progress_events_to_todo(events)
+    assert todo["status"] == "in_progress"
+    assert todo["steps"][0]["status"] == "completed"
+    assert todo["steps"][1]["status"] == "in_progress"
+
+
+def test_progress_completion_preserves_pending_steps():
     events = append_progress_event([], {"type": "todo_created", "plan": _plan_with_pending_step()})
     events = append_progress_event(
         events,
@@ -184,7 +199,7 @@ def test_progress_completion_terminalizes_pending_steps():
     assert [step["status"] for step in todo["steps"]] == [
         "completed",
         "completed",
-        "completed",
+        "pending",
     ]
 
 

@@ -981,7 +981,7 @@ NEXT: 建议的下一步"""
             return text
 
         for msg in reversed(messages):
-            if msg.get("role") == "user":
+            if msg.get("role") == "user" and msg.get("_model_source") in (None, "human"):
                 content = msg.get("content", "")
                 if isinstance(content, str) and not content.startswith("[系统]"):
                     content = _strip_context_prefix(content)

@@ -1145,6 +1145,9 @@ class OpenAIProvider(LLMProvider):
             except Exception as _cache_err:
                 logger.debug(f"[CACHE] DashScope cache_control injection skipped: {_cache_err}")
 
+        from ..request_budget import validate_request_body
+
+        validate_request_body(body, self.config)
         return body
 
     @staticmethod
