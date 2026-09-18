@@ -197,7 +197,7 @@ export function Sidebar({
     void refreshAccountCapability();
   }, [refreshAccountCapability]);
 
-  const refreshAccountSnapshot = useCallback(async () => {
+  const refreshAccountSnapshot = useCallback(async (force = false) => {
     const request = ++accountSnapshotRequest.current;
     const generation = getAccountGeneration();
     if (!httpApiBase || !serviceRunning || !accountCapability?.enabled) {
@@ -205,7 +205,7 @@ export function Sidebar({
       return;
     }
     try {
-      const response = await safeFetch(`${httpApiBase}/api/account/status`);
+      const response = await safeFetch(`${httpApiBase}/api/account/status${force ? '?refresh=true' : ''}`);
       if (response.ok) {
         const snapshot = await response.json() as AccountStatusSummary;
         if (request === accountSnapshotRequest.current && generation === getAccountGeneration()) {
@@ -221,7 +221,7 @@ export function Sidebar({
 
   useEffect(() => {
     void refreshAccountSnapshot();
-    const refresh = () => { if (document.visibilityState !== "hidden") void refreshAccountSnapshot(); };
+    const refresh = () => { if (document.visibilityState !== "hidden") void refreshAccountSnapshot(true); };
     window.addEventListener("focus", refresh);
     const timer = window.setInterval(refresh, 30_000);
     return () => {
