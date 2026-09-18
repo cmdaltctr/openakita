@@ -303,23 +303,10 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _build_system_blocks(system: str) -> list[dict]:
-        """Split system prompt into static + dynamic blocks for Anthropic prompt caching.
+        """Use the shared boundary contract, with capability gating at the caller."""
+        from ..cache import build_cached_system_blocks
 
-        Uses the '## Developer' section boundary as the split point.
-        The static part (System section) gets cache_control to enable
-        cross-turn prompt caching, reducing token costs significantly.
-        """
-        _BOUNDARY = "\n\n---\n\n## Developer"
-        idx = system.find(_BOUNDARY)
-        if idx == -1:
-            return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
-        static_part = system[:idx]
-        dynamic_part = system[idx:]
-        blocks = [
-            {"type": "text", "text": static_part, "cache_control": {"type": "ephemeral"}},
-            {"type": "text", "text": dynamic_part},
-        ]
-        return blocks
+        return build_cached_system_blocks(system)
 
     def _build_request_body(self, request: LLMRequest) -> dict:
         """构建请求体。

@@ -20,6 +20,76 @@ from openakita.prompt import builder
 from openakita.prompt.turn_context import extract_context
 
 
+def test_anthropic_without_cache_capability_has_no_cache_fields(monkeypatch):
+    from dataclasses import replace
+
+    from openakita.llm.providers import anthropic
+
+    caps = anthropic.get_model_capabilities("claude-sonnet-4-20250514")
+    monkeypatch.setattr(
+        anthropic, "get_model_capabilities", lambda _: replace(caps, supports_cache=False)
+    )
+    provider = AnthropicProvider(
+        EndpointConfig(
+            name="test",
+            provider="anthropic",
+            api_type="anthropic",
+            model="claude-sonnet-4-20250514",
+            api_key="test",
+            base_url="https://example.invalid",
+        )
+    )
+    prompt = "static<!-- DYNAMIC_BOUNDARY -->dynamic"
+    body = provider._build_request_body(
+        LLMRequest(
+            messages=[Message(role="user", content="hello")],
+            system=prompt,
+            max_tokens=100,
+        )
+    )
+    assert body["system"] == prompt
+    assert "cache_control" not in str(body)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "static<!-- DYNAMIC_BOUNDARY -->dynamic",
+        "static\n\n---\n\n## Developer instructions<!-- DYNAMIC_BOUNDARY -->dynamic",
+        "static\n\n---\n\n## Developer legacy",
+        "static",
+        "",
+        "<!-- DYNAMIC_BOUNDARY -->dynamic",
+        "static<!-- DYNAMIC_BOUNDARY -->",
+    ],
+)
+def test_anthropic_wire_uses_shared_cache_boundary(prompt):
+    provider = AnthropicProvider(
+        EndpointConfig(
+            name="test",
+            provider="anthropic",
+            api_type="anthropic",
+            model="claude-sonnet-4-20250514",
+            api_key="test",
+            base_url="https://example.invalid",
+        )
+    )
+    body = provider._build_request_body(
+        LLMRequest(
+            messages=[Message(role="user", content="hello")],
+            system=prompt,
+            max_tokens=100,
+        )
+    )
+    expected = build_cached_system_blocks(prompt)
+    assert body.get("system", []) == expected
+    assert all(block["text"] for block in expected)
+    if "<!-- DYNAMIC_BOUNDARY -->" in prompt and prompt.startswith("static"):
+        assert "dynamic" not in expected[0]["text"]
+        assert "cache_control" in expected[0]
+        assert all("cache_control" not in block for block in expected[1:])
+
+
 @pytest.fixture
 def build_prompt(tmp_path, monkeypatch):
     monkeypatch.setattr(builder, "check_compiled_outdated", lambda _: False)
