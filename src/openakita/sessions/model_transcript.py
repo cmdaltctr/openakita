@@ -225,7 +225,7 @@ class ModelTranscript:
         if self.outcomes.get(result["tool_use_id"]) != result:
             await self._commit("tool_progress", [], tool_result=result)
 
-    async def update_context(self, messages: list[dict], key: str, payload: str) -> None:
+    async def update_context(self, messages: list[dict], key: str, payload: str | None) -> None:
         old = self.latest_context().get(key, {}).get("_model_context", {})
         if old.get("payload", "") == payload:
             return

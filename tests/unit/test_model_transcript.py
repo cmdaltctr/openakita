@@ -31,6 +31,49 @@ async def opened(tmp_path, stream="test"):
     return store
 
 
+async def test_plan_context_dedup_clear_unavailable_and_restart(tmp_path, monkeypatch):
+    from openakita.core._reasoning_runtime import ReasoningEngine
+    from openakita.sessions.model_transcript import active_transcript
+
+    store = await opened(tmp_path)
+    token = active_transcript.set(store)
+    messages = await store.admit([user()], {}, "", "1")
+    payload = ["Step 1: pending"]
+    monkeypatch.setattr(
+        "openakita.tools.handlers.plan.get_active_todo_prompt", lambda _: payload[0]
+    )
+    try:
+        await ReasoningEngine._sync_plan_context(None, messages, "test")
+        baseline = deepcopy(messages)
+        await ReasoningEngine._sync_plan_context(None, messages, "test")
+        assert messages == baseline
+        payload[0] = "Step 1: completed"
+        await ReasoningEngine._sync_plan_context(None, messages, "test")
+        assert messages[: len(baseline)] == baseline
+        assert messages[-1]["_model_context"]["version"] == 2
+
+        def unavailable(_):
+            raise OSError("plan store unavailable")
+
+        monkeypatch.setattr("openakita.tools.handlers.plan.get_active_todo_prompt", unavailable)
+        await ReasoningEngine._sync_plan_context(None, messages, "test")
+        assert messages[-1]["_model_context"]["status"] == "unavailable"
+        payload[0] = ""
+        monkeypatch.setattr(
+            "openakita.tools.handlers.plan.get_active_todo_prompt", lambda _: payload[0]
+        )
+        await ReasoningEngine._sync_plan_context(None, messages, "test")
+        assert messages[-1]["_model_context"]["status"] == "cleared"
+        store.close()
+        store = await opened(tmp_path)
+        assert store.messages == messages
+        compacted = store.retain_context([user("summary")])
+        assert compacted[-1]["_model_context"]["status"] == "cleared"
+    finally:
+        active_transcript.reset(token)
+        store.close()
+
+
 async def test_two_turns_restart_and_state_dedup(tmp_path):
     store = await opened(tmp_path)
     first = await store.admit([user()], {"working_facts": "A"}, "TIME-1", "t1")
@@ -309,6 +352,8 @@ async def test_real_reasoning_loop_replays_normal_turns_and_completed_retries(
     from openakita.prompt.turn_context import encode_context
 
     monkeypatch.setattr(settings, "project_root", tmp_path)
+    plan = ["plan version 1"]
+    monkeypatch.setattr("openakita.tools.handlers.plan.get_active_todo_prompt", lambda _: plan[0])
     requests = []
 
     def engine():
@@ -376,11 +421,14 @@ async def test_real_reasoning_loop_replays_normal_turns_and_completed_retries(
 
     first = await run_turn(engine(), "one", "1", "T1")
     assert not any(e["type"] == "error" for e in first), first
+    plan[0] = "plan version 2"
     second = await run_turn(engine(), "two", "2", "T2")
     assert not any(e["type"] == "error" for e in second), second
     assert len(requests) == 2
     assert requests[0][1] == requests[1][1] == "stable"
     assert requests[1][0][: len(requests[0][0])] == requests[0][0]
+    assert requests[0][0][-1]["_model_context"]["payload"] == "plan version 1"
+    assert requests[1][0][-1]["_model_context"]["payload"] == "plan version 2"
     assistant = next(m for m in requests[1][0] if m["role"] == "assistant")
     assert assistant["content"] == [{"type": "text", "text": "raw answer"}]
     assert assistant["reasoning_content"] == "reasoning"

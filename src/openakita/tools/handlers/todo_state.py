@@ -177,19 +177,10 @@ def _emit_todo_lifecycle_event(session_id: str, event_type: str, plan: dict | No
 
 
 def auto_close_todo(session_id: str) -> bool:
-    """
-    自动关闭指定 session 的活跃 Todo（任务结束时调用）。
+    """Close only plans whose steps were explicitly marked completed.
 
-    当一轮 ReAct 循环结束但 LLM 未显式调用 complete_todo 时，
-    此函数确保 Todo 被正确收尾。
-
-    **多轮计划保护**: 如果计划中仍有 pending 步骤（尚未开始执行），
-    说明这是一个跨多轮的计划，本轮只是完成了部分步骤。此时不关闭
-    计划，仅将 in_progress 步骤标记为 completed，保留 pending 步骤
-    供下一轮继续执行。
-
-    Returns:
-        True 如果有 Todo 被关闭，False 如果没有活跃 Todo（或计划被保留）
+    Pending, running, failed, skipped and cancelled steps retain their status.
+    A response ending is not independent verification of success.
     """
     if not has_active_todo(session_id):
         return False
@@ -198,40 +189,10 @@ def auto_close_todo(session_id: str) -> bool:
     plan = handler.get_plan_for(session_id) if handler else None
     if not handler or not plan:
         unregister_active_todo(session_id)
-        return True
-
-    steps = plan.get("steps", [])
-    has_pending = any(s.get("status") == "pending" for s in steps)
-
-    if has_pending:
-        # Multi-turn plan: keep plan alive, just snapshot in_progress steps.
-        # TD2: Protect steps marked in_progress during the CURRENT turn —
-        # if a step has a last_updated_turn matching the current turn_id,
-        # leave it in_progress for the next turn to avoid the race condition
-        # where auto_close runs right after the LLM sets a step in_progress.
-        from datetime import datetime as _dt
-
-        _now = _dt.now().isoformat()
-        current_turn = plan.get("_current_turn_id", "")
-        for step in steps:
-            if step.get("status") == "in_progress":
-                step_turn = step.get("_last_updated_turn", "")
-                if current_turn and step_turn == current_turn:
-                    continue
-                step["status"] = "completed"
-                step["result"] = step.get("result") or "(本轮自动标记完成)"
-                step["completed_at"] = _now
-        # Persist intermediate state
-        if hasattr(handler, "_store"):
-            handler._store.upsert(session_id, plan)
-            handler._store.save()
-        logger.info(
-            f"[Todo] Plan for {session_id} has {sum(1 for s in steps if s.get('status') == 'pending')} "
-            f"pending steps, keeping alive for next turn"
-        )
         return False
 
-    handler.finalize_plan(plan, session_id, action="auto_close")
+    if not handler.finalize_plan(plan, session_id, action="auto_close"):
+        return False
     logger.info(f"[Todo] Auto-closed todo for session {session_id}")
 
     unregister_active_todo(session_id)
@@ -240,18 +201,10 @@ def auto_close_todo(session_id: str) -> bool:
 
 
 def complete_todo_after_final_answer(session_id: str) -> bool:
-    """
-    Close the active Todo after a normal final assistant answer has been produced.
+    """Record response completion; close only an explicitly completed plan.
 
-    ``auto_close_todo`` intentionally preserves plans that still have pending
-    steps so a genuine multi-turn plan can continue.  The chat API has stronger
-    context: when the turn ended with a visible final answer, no ask_user prompt,
-    and no agent error, leaving the active Todo registered makes history
-    hydration re-attach stale progress.  This finalizer is for that narrower
-    backend lifecycle point.
-
-    Returns:
-        True if an active Todo registration was closed, False if there was none.
+    Returns False when unfinished or unsuccessful steps remain. The active plan
+    stays persisted for continuation, explicit closure or cancellation.
     """
     if not has_active_todo(session_id):
         return False
@@ -260,9 +213,10 @@ def complete_todo_after_final_answer(session_id: str) -> bool:
     plan = handler.get_plan_for(session_id) if handler else None
     if not handler or not plan:
         unregister_active_todo(session_id)
-        return True
+        return False
 
-    handler.finalize_plan(plan, session_id, action="final_answer")
+    if not handler.finalize_plan(plan, session_id, action="final_answer"):
+        return False
     logger.info(f"[Todo] Completed todo for session {session_id} after final answer")
 
     unregister_active_todo(session_id)
@@ -346,7 +300,7 @@ def get_todo_handler_for_session(session_id: str) -> Optional["PlanHandler"]:
 
 def get_active_todo_prompt(session_id: str) -> str:
     """
-    获取 session 对应的活跃 Todo 提示词段落（注入 system_prompt 用）。
+    获取 session 对应的活跃 Todo 状态段落（供持久事件采样）。
 
     返回紧凑格式的计划摘要，包含所有步骤及其当前状态。
     如果没有活跃 Todo 或 Todo 已完成，返回空字符串。

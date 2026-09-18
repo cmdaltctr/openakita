@@ -74,6 +74,42 @@ def _register_plan(monkeypatch: pytest.MonkeyPatch, tmp_path, sid: str) -> tuple
 
 
 class TestPlanSessionState:
+    def test_unfinished_response_persists_without_completion_event(self, monkeypatch, tmp_path):
+        sid = "unfinished-response"
+        try:
+            handler, plan = _register_plan(monkeypatch, tmp_path, sid)
+            snapshot, events = _complete_active_todo_after_final_answer(sid, plan, [])
+            assert events == []
+            assert snapshot["steps"][-1]["status"] == "pending"
+            assert auto_close_todo(sid) is False
+            clear_session_todo_state(sid)
+            new_handler = PlanHandler(_DummyAgent(sid))
+            new_handler._store.load()
+            restored = new_handler.get_plan_for(sid)
+            assert restored["steps"][-1]["status"] == "pending"
+            assert handler.get_plan_prompt_section(sid) == handler.get_plan_prompt_section(sid)
+            assert cancel_todo(sid) is True
+            assert restored["steps"][-1]["status"] == "cancelled"
+        finally:
+            clear_session_todo_state(sid)
+
+    def test_plan_snapshot_uses_recorded_time_and_truthful_counts(self, monkeypatch, tmp_path):
+        sid = "snapshot"
+        try:
+            handler, plan = _register_plan(monkeypatch, tmp_path, sid)
+            plan["steps"][0]["status"] = "failed"
+            plan["steps"][-1].update(status="in_progress", started_at="2000-01-01T00:00:00")
+            before = handler.get_plan_prompt_section(sid)
+            assert "failed=1" in before
+            assert "2000-01-01T00:00:00" in before
+            assert "STALE" not in before
+            plan["last_response_end"] = {"observed_at": "now"}
+            assert handler.get_plan_prompt_section(sid) == before
+            plan["steps"][0]["result"] = "new failure detail"
+            assert handler.get_plan_prompt_section(sid) != before
+        finally:
+            clear_session_todo_state(sid)
+
     def test_initial_state(self):
         sid = "test-plan-session-1"
         clear_session_todo_state(sid)
@@ -109,21 +145,25 @@ class TestPlanSessionState:
         result = auto_close_todo(sid)
         assert isinstance(result, bool)
 
-    def test_final_answer_completion_closes_pending_steps(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("status", ["pending", "in_progress", "failed", "skipped", "cancelled"])
+    def test_final_answer_preserves_unfinished_steps(self, monkeypatch, tmp_path, status):
         sid = "test-plan-session-final-answer"
         clear_session_todo_state(sid)
         try:
             _handler, plan = _register_plan(monkeypatch, tmp_path, sid)
+            plan["steps"][-1]["status"] = status
+            assert auto_close_todo(sid) is False
+            assert plan["steps"][-1]["status"] == status
 
             result = complete_todo_after_final_answer(sid)
 
-            assert result is True
-            assert has_active_todo(sid) is False
-            assert plan["status"] == "completed"
+            assert result is False
+            assert has_active_todo(sid) is True
+            assert plan["status"] == "in_progress"
             assert [step["status"] for step in plan["steps"]] == [
                 "completed",
                 "completed",
-                "completed",
+                status,
             ]
         finally:
             clear_session_todo_state(sid)
@@ -133,6 +173,7 @@ class TestPlanSessionState:
         clear_session_todo_state(sid)
         try:
             _handler, plan = _register_plan(monkeypatch, tmp_path, sid)
+            plan["steps"][-1]["status"] = "completed"
 
             snapshot, events = _complete_active_todo_after_final_answer(sid, plan, [])
 

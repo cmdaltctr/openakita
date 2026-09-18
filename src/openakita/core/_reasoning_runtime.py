@@ -1420,6 +1420,37 @@ class ReasoningEngine:
 
     # ==================== 流式输出 (SSE) ====================
 
+    async def _sync_plan_context(self, messages: list[dict], conversation_id: str | None) -> None:
+        """Sample plan state at a safe tool-batch boundary, never rewrite system/history."""
+        if not conversation_id:
+            return
+        from ..tools.handlers.plan import get_active_todo_prompt
+
+        try:
+            payload = get_active_todo_prompt(conversation_id)
+        except Exception:
+            logger.warning("Plan state is temporarily unavailable", exc_info=True)
+            payload = None
+        transcript = active_transcript.get()
+        if transcript is not None:
+            await transcript.update_context(messages, "active_plan", payload)
+            return
+        # Compatibility for direct engine callers without a durable session.
+        from ..sessions.model_transcript import _context_message
+
+        old = next(
+            (
+                m.get("_model_context", {})
+                for m in reversed(messages)
+                if m.get("_model_context", {}).get("key") == "active_plan"
+            ),
+            {},
+        )
+        if old.get("payload", "") != payload:
+            messages.append(
+                _context_message("active_plan", payload, "session", old.get("version", 0) + 1)
+            )
+
     async def reason_stream(self, messages: list[dict], **kwargs):
         """Admit once, then replay committed model messages across normal turns and restarts."""
         conversation_id = kwargs.get("conversation_id")
@@ -1779,17 +1810,7 @@ class ReasoningEngine:
             def _build_effective_prompt() -> str:
                 if getattr(state, "_content_safety_minimal_prompt", False):
                     return _CONTENT_SAFETY_MINIMAL_PROMPT_STREAM
-                try:
-                    from ..tools.handlers.plan import get_active_todo_prompt
-
-                    prompt = _base_sp
-                    if conversation_id:
-                        plan_section = get_active_todo_prompt(conversation_id)
-                        if plan_section:
-                            prompt += f"\n\n{plan_section}\n"
-                    return prompt
-                except Exception:
-                    return _base_sp
+                return _base_sp
 
             effective_prompt = _build_effective_prompt()
 
@@ -2173,6 +2194,7 @@ class ReasoningEngine:
 
                 _ctx_compressed_info: dict | None = None
                 effective_prompt = _build_effective_prompt()
+                await self._sync_plan_context(working_messages, conversation_id)
                 if len(working_messages) > 2:
                     if active_transcript.get() is None:
                         working_messages = self._context_manager.pre_request_cleanup(
