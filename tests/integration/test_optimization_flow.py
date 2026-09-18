@@ -507,9 +507,26 @@ class TestContextManagerOptimizations:
         messages = [
             {"role": "user", "content": f"Message {i}" + " padding" * 100} for i in range(20)
         ]
-        max_tokens = 50
+        # Leave room for the two recent messages and the truncation notice.
+        max_tokens = cm.estimate_messages_tokens(messages[-2:]) + 100
         result = cm._hard_truncate_if_needed(messages, max_tokens)
-        assert len(result) >= 2
+        assert result[-2:] == messages[-2:]
+        assert cm.estimate_messages_tokens(result) <= max_tokens
+
+    def test_hard_truncate_rejects_impossible_budget_without_mutating_history(self):
+        from copy import deepcopy
+
+        from openakita.agent.context import ContextManager
+        from openakita.core.compression_contract import CompressionError
+
+        cm = ContextManager(MagicMock())
+        messages = [
+            {"role": "user", "content": f"Message {i}" + " padding" * 100} for i in range(20)
+        ]
+        original = deepcopy(messages)
+        with pytest.raises(CompressionError, match="cannot satisfy the requested budget"):
+            cm._hard_truncate_if_needed(messages, 50)
+        assert messages == original
 
     def test_hard_truncate_no_op_when_under_budget(self):
         from openakita.agent.context import ContextManager
