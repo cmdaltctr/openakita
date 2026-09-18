@@ -75,6 +75,30 @@ class SessionManager:
     - 会话持久化
     """
 
+    @staticmethod
+    async def open_model_transcript(
+        *,
+        data_dir: Path,
+        conversation_id: str | None,
+        profile: str = "default",
+        session: Session | None = None,
+        sub_agent: bool = False,
+    ):
+        """Acquire the session's model-history writer, separate from UI persistence."""
+        from .model_transcript import ModelTranscript, new_stream_id
+
+        variables = getattr(getattr(session, "context", None), "variables", {})
+        reset = variables.get("_context_reset_at", "") if isinstance(variables, dict) else ""
+        session_identity = getattr(session, "id", "")
+        if isinstance(session_identity, str) and session_identity:
+            reset = f"{session_identity}:{reset}"
+        stream = new_stream_id(conversation_id, profile, reset, sub_agent)
+        transcript = ModelTranscript(
+            Path(data_dir) / "model-transcripts.sqlite3" if conversation_id else None, stream
+        )
+        await transcript.open()
+        return transcript
+
     def __init__(
         self,
         storage_path: Path | None = None,

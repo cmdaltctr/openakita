@@ -223,9 +223,17 @@ class TestRecoverableExitHooks:
 
         assert result == "hit max iterations"
         f = data_dir / "working_messages" / f"{conv}.json"
-        assert f.exists()
-        payload = json.loads(f.read_text(encoding="utf-8"))
-        assert payload["metadata"]["exit_reason"] == "max_iterations"
+        assert not f.exists()
+        from openakita.sessions.model_transcript import ModelTranscript, new_stream_id
+
+        store = ModelTranscript(
+            data_dir / "model-transcripts.sqlite3", new_stream_id(conv, "default", "", False)
+        )
+        await store.open()
+        try:
+            assert store.messages == _tool_turn()
+        finally:
+            store.close()
 
     @pytest.mark.asyncio
     async def test_reason_stream_wrapper_persists_stream_that_ends_without_done(
@@ -255,9 +263,17 @@ class TestRecoverableExitHooks:
 
         assert events == [{"type": "chain_text", "content": "still working"}]
         f = data_dir / "working_messages" / f"{conv}.json"
-        assert f.exists()
-        payload = json.loads(f.read_text(encoding="utf-8"))
-        assert payload["metadata"]["exit_reason"] == "stream_incomplete"
+        assert not f.exists()
+        from openakita.sessions.model_transcript import ModelTranscript, new_stream_id
+
+        store = ModelTranscript(
+            data_dir / "model-transcripts.sqlite3", new_stream_id(conv, "default", "", False)
+        )
+        await store.open()
+        try:
+            assert store.messages == _tool_turn()
+        finally:
+            store.close()
 
 
 # ── load + merge ("不重做") ─────────────────────────────────────────────

@@ -15,6 +15,7 @@ from ..cache import (
     add_tools_cache_control,
     sort_tools_for_cache_stability,
 )
+from ..converters.messages import prepare_turn_context
 from ..converters.tools import (
     convert_tools_to_anthropic,
     has_text_tool_calls,
@@ -326,7 +327,8 @@ class AnthropicProvider(LLMProvider):
         增强: 使用模型注册表查询能力，支持 Prompt Cache。
         """
         thinking_enabled = request.enable_thinking and self.config.has_capability("thinking")
-        messages = self._serialize_messages(request.messages, thinking_enabled)
+        context_messages, system = prepare_turn_context(request.messages, request.system)
+        messages = self._serialize_messages(context_messages, thinking_enabled)
 
         # 使用模型注册表查询 max_tokens，替代硬编码
         caps = get_model_capabilities(self.config.model)
@@ -339,11 +341,11 @@ class AnthropicProvider(LLMProvider):
         }
 
         # 系统提示: 分段缓存 (静态部分标记 cache_control)
-        if request.system:
+        if system:
             if caps.supports_cache:
-                body["system"] = self._build_system_blocks(request.system)
+                body["system"] = self._build_system_blocks(system)
             else:
-                body["system"] = request.system
+                body["system"] = system
 
         # 工具 schema: 排序 + 缓存标记
         if request.tools:

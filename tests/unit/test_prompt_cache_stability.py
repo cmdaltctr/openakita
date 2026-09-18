@@ -9,10 +9,15 @@ from openakita.llm.cache import (
     SYSTEM_PROMPT_CONTEXT_END,
     build_cached_system_blocks,
 )
-from openakita.llm.converters.messages import convert_messages_to_openai
+from openakita.llm.converters.messages import (
+    convert_messages_to_openai,
+    convert_messages_to_responses,
+)
+from openakita.llm.providers.anthropic import AnthropicProvider
 from openakita.llm.providers.openai import OpenAIProvider
 from openakita.llm.types import EndpointConfig, LLMRequest, Message, ToolResultBlock, ToolUseBlock
 from openakita.prompt import builder
+from openakita.prompt.turn_context import extract_context
 
 
 @pytest.fixture
@@ -64,25 +69,28 @@ def test_full_and_minimal_share_rules_and_identity_prefix(build_prompt):
     assert build_cached_system_blocks(full)[0] == build_cached_system_blocks(minimal)[0]
 
 
-def test_dynamic_context_does_not_change_system_or_earlier_history(build_prompt):
+@pytest.mark.parametrize("provider", ["deepseek", "openai", "dashscope", "google", "moonshot"])
+def test_dynamic_context_does_not_change_system_or_earlier_history(build_prompt, provider):
     history = [
         Message(role="user", content="old question"),
         Message(role="assistant", content="old answer"),
         Message(role="user", content="current question"),
     ]
     original = deepcopy(history)
-    first = convert_messages_to_openai(history, build_prompt(), provider="deepseek")
+    first = convert_messages_to_openai(history, build_prompt(), provider=provider)
     second = convert_messages_to_openai(
         history,
         build_prompt(clock="11:06:02", count=21, memory="MEMORY-B"),
-        provider="deepseek",
+        provider=provider,
     )
-    assert first[:3] == second[:3]
+    assert first == second
     assert first[-1] == second[-1] == {"role": "user", "content": "current question"}
-    assert "MEMORY-A" in first[-2]["content"]
-    assert "MEMORY-B" in second[-2]["content"]
-    assert "11:06:02" in second[-2]["content"]
-    assert "21 条" in second[-2]["content"]
+    _, sections, sampled_time = extract_context(
+        build_prompt(clock="11:06:02", count=21, memory="MEMORY-B")
+    )
+    assert sections["retrieved_memory"] == "MEMORY-B"
+    assert "11:06:02" in sampled_time
+    assert "21 条" not in str(sections)
     assert "MEMORY-B" not in second[0]["content"]
     assert history == original
 
@@ -102,7 +110,7 @@ def test_tool_continuation_keeps_call_result_adjacency_and_reasoning(build_promp
     wire = convert_messages_to_openai(
         messages, build_prompt(), provider="deepseek", enable_thinking=True
     )
-    assert [m["role"] for m in wire] == ["system", "user", "user", "assistant", "tool"]
+    assert [m["role"] for m in wire] == ["system", "user", "assistant", "tool"]
     assert wire[-2]["tool_calls"][0]["id"] == wire[-1]["tool_call_id"] == "call-1"
     assert wire[-2]["reasoning_content"] == "Need to read it"
 
@@ -115,16 +123,53 @@ def test_appended_policies_stay_system_even_with_literal_delimiter_in_memory(bui
     )
     assert "POLICY: ask before deleting files." in wire[0]["content"]
     assert "untrusted data" not in wire[0]["content"]
-    assert "untrusted data" in wire[1]["content"]
+    assert "untrusted data" in extract_context(prompt)[1]["retrieved_memory"]
 
 
 @pytest.mark.parametrize("provider", ["openai", "dashscope", "google", "moonshot"])
-def test_other_providers_keep_existing_system_layout(build_prompt, provider):
+def test_other_providers_move_context_out_of_system(build_prompt, provider):
     prompt = build_prompt()
     wire = convert_messages_to_openai(
         [Message(role="user", content="hello")], prompt, provider=provider
     )
-    assert wire == [{"role": "system", "content": prompt}, {"role": "user", "content": "hello"}]
+    assert "11:02:17" not in wire[0]["content"]
+    assert len(wire) == 2  # Adapters never insert request-local context.
+    assert wire[-1] == {"role": "user", "content": "hello"}
+
+
+@pytest.mark.parametrize("api", ["responses", "anthropic"])
+def test_native_apis_keep_system_and_history_stable(build_prompt, api):
+    history = [
+        Message(role="user", content="old question"),
+        Message(role="assistant", content="old answer"),
+        Message(role="user", content="read file"),
+        Message(role="assistant", content=[ToolUseBlock(id="call-1", name="read_file", input={})]),
+        Message(role="user", content=[ToolResultBlock(tool_use_id="call-1", content="contents")]),
+    ]
+    original = deepcopy(history)
+
+    def convert(prompt):
+        if api == "responses":
+            return convert_messages_to_responses(history, prompt)
+        provider = AnthropicProvider(
+            EndpointConfig(
+                name="test",
+                provider="anthropic",
+                api_type="anthropic",
+                model="claude-sonnet-4-20250514",
+                api_key="test",
+                base_url="https://example.invalid",
+            )
+        )
+        body = provider._build_request_body(LLMRequest(messages=history, system=prompt))
+        return body["messages"], body["system"]
+
+    first, first_system = convert(build_prompt())
+    second, second_system = convert(build_prompt(clock="11:06:02"))
+    assert first_system == second_system
+    assert "11:02:17" not in str(first_system)
+    assert first == second
+    assert history == original
 
 
 def test_unmarked_custom_prompts_are_not_reinterpreted():
@@ -155,8 +200,7 @@ def test_final_request_body_keeps_authority_and_context_separate(build_prompt):
         system=build_prompt() + "\nAPPENDED-SYSTEM-POLICY",
     )
     wire = provider._build_request_body(request)["messages"]
-    assert [m["role"] for m in wire] == ["system", "user", "user"]
+    assert [m["role"] for m in wire] == ["system", "user"]
     assert "APPENDED-SYSTEM-POLICY" in wire[0]["content"]
     assert "MEMORY-A" not in wire[0]["content"]
-    assert "MEMORY-A" in wire[1]["content"]
-    assert wire[2]["content"] == "hello"
+    assert wire[1]["content"] == "hello"
