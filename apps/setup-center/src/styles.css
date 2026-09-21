@@ -2088,7 +2088,12 @@ button.btnPrimary:hover {
 
 /* Search highlight (CSS Custom Highlight API) */
 ::highlight(msg-search) {
-  background-color: #fbbf24;
+  background-color: #FFFF00;
+  color: #000;
+}
+
+::highlight(msg-search-active) {
+  background-color: #FF9632;
   color: #000;
 }
 

@@ -1209,9 +1209,14 @@ export function ChatView({
   const [msgSearchOpen, setMsgSearchOpen] = useState(false);
   const [msgSearchQuery, setMsgSearchQuery] = useState("");
   const [msgSearchIdx, setMsgSearchIdx] = useState(0);
+  const [msgSearchCount, setMsgSearchCount] = useState(0);
+  const currentMsgSearchIdx = Math.min(msgSearchIdx, Math.max(0, msgSearchCount - 1));
   const msgSearchRef = useRef<HTMLInputElement | null>(null);
   const messageListRef = useRef<MessageListHandle>(null);
   const isMessageListAtBottomRef = useRef(true);
+  useEffect(() => {
+    setMsgSearchIdx(0);
+  }, [activeConvId, msgSearchQuery, msgSearchOpen]);
   // 会话大纲（Conversation outline）：右侧常驻迷你导航，悬浮展开，列出所有用户提问并支持点击跳转
   const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
@@ -7628,11 +7633,7 @@ export function ChatView({
         {/* 消息搜索栏 */}
         {msgSearchOpen && (() => {
           const q = msgSearchQuery.trim().toLowerCase();
-          const matches = q ? messages.reduce<number[]>((acc, m, idx) => {
-            if (m.content.toLowerCase().includes(q)) acc.push(idx);
-            return acc;
-          }, []) : [];
-          const total = matches.length;
+          const total = messages.length > 0 ? msgSearchCount : 0;
           return (
             <div className="flex items-center gap-2 border-b border-border/60 bg-muted/20 px-4 py-2 text-sm">
               <input
@@ -7644,10 +7645,9 @@ export function ChatView({
                     e.preventDefault();
                     if (total > 0) {
                       const nextIdx = e.shiftKey
-                        ? (msgSearchIdx - 1 + total) % total
-                        : (msgSearchIdx + 1) % total;
+                        ? (currentMsgSearchIdx - 1 + total) % total
+                        : (currentMsgSearchIdx + 1) % total;
                       setMsgSearchIdx(nextIdx);
-                      messageListRef.current?.scrollToIndex(matches[nextIdx], "center");
                     }
                   }
                   if (e.key === "Escape") { setMsgSearchOpen(false); setMsgSearchQuery(""); }
@@ -7659,7 +7659,7 @@ export function ChatView({
                   color: "var(--fg)",
                 }}
               />
-              {q && <span style={{ opacity: 0.5, fontSize: 11, whiteSpace: "nowrap" }}>{total > 0 ? `${msgSearchIdx + 1}/${total}` : t("common.noResults", "无结果")}</span>}
+              {q && <span style={{ opacity: 0.5, fontSize: 11, whiteSpace: "nowrap" }}>{total > 0 ? `${currentMsgSearchIdx + 1}/${total}` : t("common.noResults", "无结果")}</span>}
               <button onClick={() => { setMsgSearchOpen(false); setMsgSearchQuery(""); }} style={{ background: "none", border: "none", cursor: "pointer", opacity: 0.5, padding: 2 }}>
                 <IconX size={14} />
               </button>
@@ -7736,6 +7736,9 @@ export function ChatView({
             apiBaseUrl={apiBaseUrl}
             mdModules={mdModules}
             isStreaming={isCurrentConvStreaming}
+            searchHighlight={msgSearchOpen ? msgSearchQuery : ""}
+            activeSearchIndex={currentMsgSearchIdx}
+            onSearchMatchCountChange={setMsgSearchCount}
             conversationId={activeConvId || undefined}
             httpApiBase={() => apiBaseUrl}
             hasMoreBefore={historyPage.hasMoreBefore}

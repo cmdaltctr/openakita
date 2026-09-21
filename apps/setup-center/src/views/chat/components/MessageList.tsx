@@ -92,6 +92,8 @@ export interface MessageListProps {
   mdModules?: MdModules | null;
   isStreaming: boolean;
   searchHighlight?: string;
+  activeSearchIndex?: number;
+  onSearchMatchCountChange?: (count: number) => void;
   conversationId?: string;
   httpApiBase?: () => string;
   onPlanStepAction?: (action: "skip" | "retry", stepIdx: number, description: string) => void;
@@ -113,28 +115,55 @@ export interface MessageListProps {
   onActiveUserMessageChange?: (msgId: string | null) => void;
 }
 
-function applySearchHighlights(container: HTMLElement, query: string) {
+export function applySearchHighlights(container: HTMLElement, query: string, activeIndex = 0) {
   const css = globalThis.CSS as typeof CSS & { highlights?: Map<string, Highlight> };
-  if (!css?.highlights) return;
   const q = query.trim().toLowerCase();
-  if (!q) { css.highlights.delete("msg-search"); return; }
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  if (!q) {
+    css?.highlights?.delete("msg-search");
+    css?.highlights?.delete("msg-search-active");
+    return { count: 0, activeRange: undefined };
+  }
   const ranges: Range[] = [];
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-    const text = node.textContent?.toLowerCase() ?? "";
-    let pos = 0;
-    while (pos < text.length) {
-      const idx = text.indexOf(q, pos);
-      if (idx === -1) break;
-      const range = new Range();
-      range.setStart(node, idx);
-      range.setEnd(node, idx + q.length);
-      ranges.push(range);
-      pos = idx + q.length;
+  for (const content of container.querySelectorAll(".chatMdContent")) {
+    // Join inline markup within each block, so e.g. bold text and syntax
+    // highlighting do not split a searchable word. Never join paragraphs.
+    const groups: { block: Element; nodes: Text[] }[] = [];
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode as Text;
+      if (node.parentElement?.closest("button, script, style, [hidden], [aria-hidden='true']")) continue;
+      const block = node.parentElement?.closest("p, pre, li, td, th, h1, h2, h3, h4, h5, h6, blockquote") ?? content;
+      if (groups.at(-1)?.block !== block) groups.push({ block, nodes: [] });
+      groups[groups.length - 1].nodes.push(node);
+    }
+    for (const { nodes } of groups) {
+      const text = nodes.map(node => node.data).join("");
+      const pattern = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+      for (const match of text.matchAll(pattern)) {
+        const start = match.index!;
+        const end = start + match[0].length;
+        const range = new Range();
+        let offset = 0;
+        for (const node of nodes) {
+          const next = offset + node.length;
+          if (start >= offset && start < next) range.setStart(node, start - offset);
+          if (end > offset && end <= next) {
+            range.setEnd(node, end - offset);
+            break;
+          }
+          offset = next;
+        }
+        ranges.push(range);
+      }
     }
   }
-  css.highlights.set("msg-search", new Highlight(...ranges));
+  const selectedIndex = Math.min(Math.max(0, activeIndex), ranges.length - 1);
+  const activeRange = ranges[selectedIndex];
+  if (css?.highlights && typeof Highlight !== "undefined") {
+    css.highlights.set("msg-search", new Highlight(...ranges.filter((_, i) => i !== selectedIndex)));
+    css.highlights.set("msg-search-active", new Highlight(...(activeRange ? [activeRange] : [])));
+  }
+  return { count: ranges.length, activeRange };
 }
 
 export const MessageList = forwardRef<MessageListHandle, MessageListProps>(function MessageList(
@@ -146,6 +175,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     mdModules,
     isStreaming,
     searchHighlight,
+    activeSearchIndex = 0,
+    onSearchMatchCountChange,
     onAskAnswer,
     onRetry,
     onEdit,
@@ -272,20 +303,40 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     const el = containerRef.current;
     if (!el) return;
     const css = globalThis.CSS as typeof CSS & { highlights?: Map<string, Highlight> };
-    if (!css?.highlights) return;
 
     const q = searchHighlight?.trim().toLowerCase() ?? "";
-    applySearchHighlights(el, q);
+    let needsScroll = true;
+    const apply = () => {
+      const { count, activeRange } = applySearchHighlights(el, q, activeSearchIndex);
+      onSearchMatchCountChange?.(count);
+      const scroller = scrollerElRef.current;
+      if (needsScroll && activeRange && scroller) {
+        needsScroll = false;
+        stickToBottomRef.current = false;
+        forceSnapRef.current = false;
+        programmaticPinRef.current = 0;
+        const rect = activeRange.getBoundingClientRect();
+        const viewport = scroller.getBoundingClientRect();
+        scroller.scrollTo({
+          top: scroller.scrollTop + rect.top - viewport.top - (scroller.clientHeight - rect.height) / 2,
+          behavior: "auto",
+        });
+        recordScrollMetrics();
+        setScrolledUpState(!computeAtBottom());
+      }
+    };
+    apply();
 
     if (!q) return;
 
-    const observer = new MutationObserver(() => applySearchHighlights(el, q));
+    const observer = new MutationObserver(apply);
     observer.observe(el, { childList: true, subtree: true, characterData: true });
     return () => {
       observer.disconnect();
-      css.highlights.delete("msg-search");
+      css?.highlights?.delete("msg-search");
+      css?.highlights?.delete("msg-search-active");
     };
-  }, [searchHighlight, messages]);
+  }, [searchHighlight, activeSearchIndex, conversationId, onSearchMatchCountChange, recordScrollMetrics, setScrolledUpState, computeAtBottom]);
 
   const scrollToAbsoluteBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const el = scrollerElRef.current;
