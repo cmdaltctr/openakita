@@ -14,10 +14,12 @@ _prefixes: OrderedDict[tuple, list[bytes]] = OrderedDict()
 def _estimated_body_tokens(value):
     if isinstance(value, dict):
         kind = value.get("type")
-        if kind in {"image", "image_url", "input_image"}:
-            return 1600
-        if kind in {"video", "video_url"}:
-            return 4800
+        # Tool schemas can contain a property named "type" or a union type list.
+        if isinstance(kind, str):
+            if kind in {"image", "image_url", "input_image"}:
+                return 1600
+            if kind in {"video", "video_url"}:
+                return 4800
         return (
             sum(estimate_tokens(str(k)) + _estimated_body_tokens(v) for k, v in value.items()) + 4
         )

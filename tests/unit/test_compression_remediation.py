@@ -276,6 +276,31 @@ def test_orientation_is_separate_and_does_not_rewrite_state():
     assert "goal" * 200 in result[-1]["content"]
 
 
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "properties": {"type": {"type": "string"}}},
+        {"type": ["string", "null"]},
+    ],
+)
+def test_final_budget_handles_nested_tool_schema_types(schema, monkeypatch):
+    from openakita.config import settings
+
+    monkeypatch.setattr(settings, "context_max_window", 0)
+    body = {
+        "messages": [],
+        "tools": [{"type": "function", "function": {"name": "example", "parameters": schema}}],
+        "max_tokens": 100,
+    }
+    config = SimpleNamespace(name="schema", context_window=4096, max_tokens=100)
+    validate_request_body(body, config)
+
+    # Nested schemas still count towards the budget rather than being skipped.
+    schema["description"] = "x" * 20000
+    with pytest.raises(ValueError, match="context window"):
+        validate_request_body(body, config)
+
+
 def test_final_budget_does_not_count_base64_as_text_tokens():
     body = {
         "messages": [
