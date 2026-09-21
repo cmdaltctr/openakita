@@ -1738,6 +1738,12 @@ async def _stream_chat(
             )
             _source_used = _extract_source_used(event)
             if _source_used:
+                from openakita.core.link_diagnostics import record_link_diagnostic
+
+                if http_request is not None:
+                    _source_used = record_link_diagnostic(
+                        http_request.app.state, _source_used, conversation_id
+                    )
                 _collected_sources.append(_source_used)
                 try:
                     actual_agent._last_link_diagnostic = dict(_source_used)

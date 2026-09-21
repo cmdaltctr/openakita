@@ -1023,7 +1023,19 @@ async def list_skill_conflicts(request: Request):
     registry = getattr(actual_agent, "skill_registry", None) if actual_agent else None
     if registry is None or not hasattr(registry, "get_conflicts"):
         return {"conflicts": []}
-    return {"conflicts": registry.get_conflicts()}
+    conflicts = []
+    for record in registry.get_conflicts():
+        entry = registry.get(record.get("skill_id") or record.get("name", ""))
+        origin = getattr(entry, "origin", None)
+        conflicts.append({
+            **record,
+            "active": {
+                "origin": str(getattr(origin, "value", origin) or "unknown"),
+                "plugin_source": entry.plugin_source or "",
+                "path": str(entry.skill_path or ""),
+            } if entry else None,
+        })
+    return {"conflicts": conflicts}
 
 
 @router.post("/api/skills/conflicts/clear")

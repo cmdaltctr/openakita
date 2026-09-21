@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link2, RefreshCw, Eraser } from "lucide-react";
+import { RotateCw } from "lucide-react";
+import { Section } from "./Section";
 import { Button } from "@/components/ui/button";
 import { safeFetch } from "../providers";
-import { notifyError, notifySuccess } from "../utils/notify";
 
 export type LinkDiagnostic = {
   requested_url?: string;
@@ -11,210 +11,83 @@ export type LinkDiagnostic = {
   redirect_chain?: string[];
   status_code?: number;
   content_type?: string;
-  status?: "ok" | "error" | string;
+  status?: string;
   error_code?: string;
   hostname?: string;
+  conversation_id?: string;
+  recorded_at?: string;
+  hint?: string;
 };
 
-type ClearResponse = { ok: boolean; cleared?: Record<string, boolean> };
-
-export interface LinkDiagnosticsPanelProps {
-  httpApiBase: () => string;
-  initialDiagnostic?: LinkDiagnostic | null;
-}
-
-function shortUrl(url: string | undefined, max = 80): string {
-  if (!url) return "";
-  if (url.length <= max) return url;
-  return url.slice(0, max - 1) + "…";
-}
-
-export function LinkDiagnosticsPanel({ httpApiBase, initialDiagnostic }: LinkDiagnosticsPanelProps) {
+/** Chat passes the exact event; maintenance explicitly shows the latest record. */
+export function LinkDiagnosticDetails({ diagnostic: d }: { diagnostic: LinkDiagnostic }) {
   const { t } = useTranslation();
-  const [diag, setDiag] = useState<LinkDiagnostic | null>(initialDiagnostic ?? null);
+  const reason = d.error_code && t(`status.linkDiag.reason.${({
+    binary_content: "binary", domain_blocked: "blocked", too_many_redirects: "tooManyRedirects",
+    network_error: "network", empty_content: "empty", redirect_missing_location: "redirectInvalid",
+  } as Record<string, string>)[d.error_code] || "unknown"}`, { defaultValue: d.error_code });
+  return <div className="space-y-3 text-sm break-words">
+    <p>{t(d.status === "error" ? "status.linkDiag.failed" : "status.linkDiag.succeeded")}{reason ? ` · ${reason}` : ""}</p>
+    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2">
+      <dt>{t("status.linkDiag.url")}</dt><dd className="break-all">{d.requested_url || d.final_url || "—"}</dd>
+      <dt>{t("status.linkDiag.conversation")}</dt><dd>{d.conversation_id || t("status.linkDiag.unknownConversation")}</dd>
+      <dt>{t("status.linkDiag.time")}</dt><dd>{d.recorded_at ? new Date(d.recorded_at).toLocaleString() : "—"}</dd>
+    </dl>
+    {d.hint && <p className="text-muted-foreground">{d.hint}</p>}
+    <Section title={t("status.linkDiag.technical")}>
+      <dl className="mt-2 space-y-2 text-xs break-all">
+        <dt>{t("status.linkDiag.finalUrl")}</dt><dd>{d.final_url || d.requested_url || "—"}</dd>
+        <dt>{t("status.linkDiag.response")}</dt><dd>{d.status_code ?? "—"} · {d.content_type || "—"}</dd>
+        {!!d.redirect_chain?.length && <><dt>{t("status.linkDiag.redirects")}</dt><dd>{d.redirect_chain.join(" → ")}</dd></>}
+      </dl>
+    </Section>
+  </div>;
+}
+
+export function LinkDiagnosticsPanel({ httpApiBase, serviceRunning, disabled = false }: {
+  httpApiBase: () => string;
+  serviceRunning: boolean;
+  disabled?: boolean;
+}) {
+  const { t } = useTranslation();
+  const [diag, setDiag] = useState<LinkDiagnostic | null>(null);
   const [loading, setLoading] = useState(false);
-  const [clearing, setClearing] = useState(false);
-  const [statusText, setStatusText] = useState("");
-
-  const applyDiagnostic = useCallback((
-    body: LinkDiagnostic | Record<string, never> | null | undefined,
-    showResult: boolean,
-  ) => {
-    if (body && Object.keys(body).length > 0) {
-      setDiag(body as LinkDiagnostic);
-      if (showResult) {
-        setStatusText(t("status.linkDiag.refreshed"));
-      }
-    } else {
-      setDiag(null);
-      if (showResult) {
-        setStatusText(t("status.linkDiag.refreshedEmpty"));
-      }
-    }
-  }, [t]);
-
-  const refresh = async (showResult = true) => {
-    setLoading(true);
-    try {
-      const resp = await safeFetch(`${httpApiBase()}/api/health`, {
-        signal: AbortSignal.timeout(5_000),
-      });
-      const body = await resp.json();
-      applyDiagnostic(body?.last_link_diagnostic || null, showResult);
-    } catch (e) {
-      if (showResult) {
-        setStatusText(t("status.linkDiag.refreshFailedDetail", {
-          error: String(e),
-        }));
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+  const generation = useRef(0);
+  const base = httpApiBase();
   useEffect(() => {
-    applyDiagnostic(initialDiagnostic || null, false);
-  }, [applyDiagnostic, initialDiagnostic]);
+    generation.current++;
+    setDiag(null); setLoaded(false); setLoading(false); setError("");
+    return () => { generation.current++; };
+  }, [base, serviceRunning]);
 
-  const onClear = async () => {
-    setClearing(true);
+  async function refresh() {
+    if (!serviceRunning || disabled || loading) return;
+    const request = ++generation.current;
+    setLoading(true); setError("");
     try {
-      const resp = await safeFetch(
-        `${httpApiBase()}/api/diagnostics/clear-session-caches`,
-        { method: "POST" },
-      );
-      if (resp.ok) {
-        const body = (await resp.json()) as ClearResponse;
-        const items = Object.entries(body.cleared || {})
-          .filter(([, v]) => v)
-          .map(([k]) => k);
-        notifySuccess(
-          t("status.linkDiag.cleared", {
-            items: items.length > 0
-              ? items.join(t("status.linkDiag.itemSeparator"))
-              : "—",
-          }),
-        );
-        setDiag(null);
-        setStatusText(t("status.linkDiag.clearedHint"));
-      } else {
-        notifyError(`HTTP ${resp.status}`);
-        setStatusText(t("status.linkDiag.clearFailed"));
+      const resp = await safeFetch(`${base}/api/diagnostics/last-link`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const body = await resp.json();
+      if (request === generation.current) {
+        setDiag(Object.keys(body).length ? body : null);
+        setLoaded(true);
       }
     } catch (e) {
-      notifyError(String(e));
-      setStatusText(t("status.linkDiag.clearFailedDetail", {
-        error: String(e),
-      }));
-    } finally {
-      setClearing(false);
-    }
-  };
-
-  const requested = diag?.requested_url || "";
-  const finalUrl = diag?.final_url || requested;
-  const redirected = !!(requested && finalUrl && requested !== finalUrl);
-  const isError = (diag?.status || "").toLowerCase() === "error";
-
-  const errorReason = (() => {
-    const code = (diag?.error_code || "").toString();
-    switch (code) {
-      case "binary_content":
-        return t("status.linkDiag.reason.binary");
-      case "domain_blocked":
-        return t("status.linkDiag.reason.blocked");
-      case "too_many_redirects":
-        return t("status.linkDiag.reason.tooManyRedirects");
-      case "network_error":
-        return t("status.linkDiag.reason.network");
-      case "empty_content":
-        return t("status.linkDiag.reason.empty");
-      case "redirect_missing_location":
-        return t("status.linkDiag.reason.redirectInvalid");
-      default:
-        if (typeof diag?.status_code === "number" && diag.status_code >= 400) {
-          return t("status.linkDiag.reason.httpError", {
-            code: diag.status_code,
-          });
-        }
-        return code || "";
-    }
-  })();
-
-  return (
-    <div className="statusPanelRow">
-      <div className="statusPanelIcon">
-        <Link2 size={18} />
-      </div>
-      <div className="statusPanelInfo">
-        <div className="statusPanelTitle">
-          {t("status.linkDiag.title")}
-        </div>
-        <div className="statusPanelDesc">
-          {diag ? (
-            isError ? (
-              <span style={{ color: "var(--muted)" }}>
-                {t("status.linkDiag.notRead", {
-                  url: shortUrl(finalUrl || requested),
-                })}
-                {errorReason
-                  ? t("status.linkDiag.reasonSuffix", {
-                      reason: errorReason,
-                    })
-                  : ""}
-              </span>
-            ) : redirected ? (
-              <span>
-                {t("status.linkDiag.redirected", {
-                  final: shortUrl(finalUrl),
-                  requested: shortUrl(requested),
-                })}
-              </span>
-            ) : (
-              <span>
-                {t("status.linkDiag.ok", {
-                  final: shortUrl(finalUrl),
-                })}
-              </span>
-            )
-          ) : (
-            <span style={{ opacity: 0.7 }}>
-              {t("status.linkDiag.empty")}
-            </span>
-          )}
-          {statusText && (
-            <div style={{ marginTop: 4, fontSize: 12, opacity: 0.75 }}>
-              {statusText}
-            </div>
-          )}
-        </div>
-      </div>
-      <div className="statusPanelActions" style={{ display: "flex", gap: 6 }}>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-7 text-xs px-2.5"
-          onClick={() => refresh(true)}
-          disabled={loading || clearing}
-          title={t("status.linkDiag.refresh") as string}
-        >
-          <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
-          {loading ? t("status.checking") : t("status.linkDiag.refresh")}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-7 text-xs px-2.5"
-          onClick={onClear}
-          disabled={clearing || loading}
-          title={
-            t("status.linkDiag.clearHint") as string
-          }
-        >
-          {clearing ? <RefreshCw size={12} className="animate-spin" /> : <Eraser size={12} />}
-          {clearing ? t("status.linkDiag.clearing") : t("status.linkDiag.clear")}
-        </Button>
-      </div>
+      if (request === generation.current) setError(t("status.linkDiag.refreshFailedDetail", { error: String(e) }));
+    } finally { if (request === generation.current) setLoading(false); }
+  }
+  return <>
+    <div className="flex flex-wrap items-center gap-2">
+      <Button size="sm" variant="outline" onClick={() => void refresh()} disabled={disabled || loading || !serviceRunning}>
+        <RotateCw size={14} className={loading ? "animate-spin" : undefined} />
+        {t(loaded ? "status.linkDiag.refresh" : "status.linkDiag.load")}
+      </Button>
+      {!serviceRunning && <span className="text-xs text-muted-foreground">{t("adv.needService")}</span>}
     </div>
-  );
+    {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+    {serviceRunning && diag && <LinkDiagnosticDetails diagnostic={diag} />}
+    {serviceRunning && loaded && !diag && !error && <p className="text-sm text-muted-foreground">{t("status.linkDiag.empty")}</p>}
+  </>;
 }

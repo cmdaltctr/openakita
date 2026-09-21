@@ -41,12 +41,12 @@ describe("status page translations", () => {
       t("status.skillConflicts.title"),
     ]).toEqual([
       "Environment healthy",
-      "Refresh",
-      "Clear Local Session Cache",
+      "Refresh record",
+      "Clear runtime caches",
       "Refresh Status",
       "View Details",
       "Link Read Diagnostics",
-      "Duplicate Skill Sources",
+      "Skill source records",
     ]);
   });
 });

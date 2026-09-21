@@ -14,6 +14,8 @@ import { safeFetch } from "../providers";
 import { joinPath, envGet, envSet } from "../utils";
 import { notifySuccess, notifyError, notifyLoading, dismissLoading } from "../utils/notify";
 import { FieldText, FieldBool, FieldSelect } from "../components/EnvFields";
+import { CacheMaintenancePanel } from "../components/CacheMaintenancePanel";
+import { LinkDiagnosticsPanel } from "../components/LinkDiagnosticsPanel";
 import { Section } from "../components/Section";
 import { WebPasswordManager } from "../components/WebPasswordManager";
 import { Button } from "@/components/ui/button";
@@ -31,6 +33,8 @@ import type { EnvMap, PlatformInfo, WorkspaceSummary, ViewId } from "../types";
 const SHOW_EXTENSIONS_CARD = false;
 
 export interface AdvancedViewProps {
+  openDiagnostics?: boolean;
+  onDiagnosticsOpened?: () => void;
   envDraft: EnvMap;
   setEnvDraft: React.Dispatch<React.SetStateAction<EnvMap>>;
   busy: string | null;
@@ -81,6 +85,14 @@ export function AdvancedView(props: AdvancedViewProps) {
   } = props;
 
   const { t } = useTranslation();
+  const diagnosticsRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    if (!props.openDiagnostics || !diagnosticsRef.current) return;
+    diagnosticsRef.current.open = true;
+    diagnosticsRef.current.scrollIntoView({ block: "start" });
+    diagnosticsRef.current.querySelector("summary")?.focus();
+    props.onDiagnosticsOpened?.();
+  }, [props.openDiagnostics]);
 
   // ── Field helpers (same pattern as App.tsx) ──
   const _envBase = { envDraft, onEnvChange: setEnvDraft, busy };
@@ -1007,6 +1019,16 @@ export function AdvancedView(props: AdvancedViewProps) {
               <span>{desktopVersion}</span>
             </div>
           )}
+        </Section>
+
+        <Section title={t("status.linkDiag.title")} subtitle={t("status.linkDiag.scope")}
+          className="mt-2" panelRef={diagnosticsRef} panelId="link-diagnostics">
+          <LinkDiagnosticsPanel httpApiBase={httpApiBase} serviceRunning={!!serviceStatus?.running} disabled={!!busy} />
+        </Section>
+
+        <Section title={t("status.linkDiag.cacheMaintenance")}
+          className="mt-2" panelId="cache-maintenance">
+          <CacheMaintenancePanel httpApiBase={httpApiBase} serviceRunning={!!serviceStatus?.running} disabled={!!busy} />
         </Section>
 
         {IS_TAURI && (

@@ -794,6 +794,7 @@ function MainApp() {
   const [, setSelectedPypiVersion] = useState<string>(""); // "" = 推荐同版本
   const [runtimeDiag, setRuntimeDiag] = useState<RuntimeDiagnostics | null>(null);
   const [runtimeDiagChecking, setRuntimeDiagChecking] = useState(false);
+  const [diagnosticsRequested, setDiagnosticsRequested] = useState(false);
   const [runtimeDialogOpen, setRuntimeDialogOpen] = useState(false);
 
   // providers & models
@@ -3408,6 +3409,8 @@ function MainApp() {
   function renderAdvanced() {
     return (
       <AdvancedView
+        openDiagnostics={diagnosticsRequested}
+        onDiagnosticsOpened={() => setDiagnosticsRequested(false)}
         envDraft={envDraft}
         setEnvDraft={setEnvDraft}
         busy={busy}

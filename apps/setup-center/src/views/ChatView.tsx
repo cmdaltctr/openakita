@@ -5277,6 +5277,12 @@ export function ChatView({
                   from_cache: event.from_cache,
                   status: event.status,
                   hint: event.hint,
+                  error_code: event.error_code,
+                  status_code: event.status_code,
+                  content_type: event.content_type,
+                  redirect_chain: event.redirect_chain,
+                  conversation_id: event.conversation_id || convId,
+                  recorded_at: event.recorded_at,
                 }];
                 break;
               case "mcp_call":
@@ -7758,6 +7764,9 @@ export function ChatView({
             onAtBottomChange={(atBottom) => { isMessageListAtBottomRef.current = atBottom; }}
             onActiveUserMessageChange={outlineItems.length > 0 ? setActiveOutlineId : undefined}
             onAskAnswer={handleAskAnswer}
+            onRetryLink={!isCurrentConvStreaming ? (url) => {
+              if (/^https?:\/\//i.test(url)) void sendMessage(t("status.linkDiag.retryPrompt", { url }), activeConvId || undefined, undefined, "agent", []);
+            } : undefined}
             onRetry={handleRegenerate}
             onEdit={handleEditMessage}
             onRegenerate={handleRegenerate}

@@ -16,6 +16,7 @@ export const FlatMessageItem = memo(function FlatMessageItem({
   msg,
   onAskAnswer,
   onRetry,
+  onRetryLink,
   onEdit,
   onRegenerate,
   onRewind,
@@ -33,6 +34,7 @@ export const FlatMessageItem = memo(function FlatMessageItem({
   msg: ChatMessage;
   onAskAnswer?: (msgId: string, answer: string) => void;
   onRetry?: (msgId: string) => void;
+  onRetryLink?: (url: string) => void;
   onEdit?: (msgId: string) => void;
   onRegenerate?: (msgId: string) => void;
   onRewind?: (msgId: string) => void;
@@ -136,6 +138,7 @@ export const FlatMessageItem = memo(function FlatMessageItem({
             onAskAnswer={onAskAnswer}
             onPlanStepAction={onPlanStepAction}
             onRetry={onRetry}
+            onRetryLink={onRetryLink}
             apiBaseUrl={apiBaseUrl}
             conversationId={conversationId}
             httpApiBase={httpApiBase}
