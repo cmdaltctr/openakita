@@ -33,3 +33,21 @@ def test_clear_session_caches_clears_known_agent_state():
 def test_clear_session_caches_without_agent_still_clears_module_caches():
     cleared = clear_session_caches(None)
     assert cleared["web_fetch"] is True
+
+
+def test_maintenance_preserves_other_summaries_access_rules_and_diagnostics(monkeypatch):
+    from unittest.mock import Mock
+
+    rules = Mock()
+    monkeypatch.setattr("openakita.agent.domain_allowlist.get_domain_allowlist", lambda: rules)
+    diagnostic = {"conversation_id": "a", "requested_url": "https://example.com"}
+    agent = SimpleNamespace(
+        context_manager=SimpleNamespace(_previous_summaries={"a": "one", "b": "two"}),
+        _last_link_diagnostic=diagnostic,
+    )
+    clear_session_caches(
+        agent, conversation_id="a", preserve_domain_rules=True, preserve_diagnostics=True
+    )
+    assert agent.context_manager._previous_summaries == {"b": "two"}
+    assert agent._last_link_diagnostic == diagnostic
+    rules.clear.assert_not_called()

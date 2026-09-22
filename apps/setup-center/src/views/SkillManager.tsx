@@ -14,7 +14,7 @@ import type {
 import { envGet, envSet } from "../utils";
 import { consumeSseStream } from "../utils/sseStateMachine";
 import { IconGear, IconZap, IconPackage, IconStar, IconCheck, IconX, IconDownload, IconSearch, IconFolderOpen, IconEdit, IconTrash, IconEye } from "../icons";
-import { Loader2, ChevronDown, ChevronRight } from "lucide-react";
+import { Loader2, ChevronDown, ChevronRight, History, RotateCw, MoreHorizontal, X } from "lucide-react";
 import { safeFetch } from "../providers";
 import { toast } from "sonner";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -30,12 +30,14 @@ import {
   AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-  Dialog, DialogContent, DialogDescription, DialogFooter,
+  Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter,
   DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ModalOverlay } from "../components/ModalOverlay";
+import { SkillConflictsPanel, useSkillConflicts } from "../components/SkillConflictsPanel";
 import { OfficialSkillMarketplace } from "./OfficialSkillMarketplace";
 
 type SkillTab = "installed" | "official" | "marketplace";
@@ -890,6 +892,7 @@ function SkillConfigForm({
 
 function SkillCard({
   skill,
+  onViewSources,
   expanded,
   onToggleExpand,
   onToggleEnabled,
@@ -903,6 +906,7 @@ function SkillCard({
   onMoveCategory,
 }: {
   skill: SkillInfo;
+  onViewSources?: () => void;
   expanded: boolean;
   onToggleExpand: () => void;
   onToggleEnabled: () => void;
@@ -960,6 +964,7 @@ function SkillCard({
                 <Badge variant="outline" className={`text-[10px] px-1.5 py-0 h-5 font-medium ${statusColor}`}>
                   {statusText}
                 </Badge>
+                {onViewSources && <Button size="sm" variant="secondary" className="h-5 px-1.5 text-[10px]" onClick={e => { e.stopPropagation(); onViewSources(); }}>{t("status.skillConflicts.badge")}</Button>}
                 <span className="text-[11px] text-muted-foreground ml-1">{skill.system ? t("skills.system") : t("skills.external")}</span>
               </div>
               <div className="text-xs text-muted-foreground truncate">
@@ -1348,6 +1353,17 @@ export function SkillManager({
     window.addEventListener("hashchange", sync);
     return () => window.removeEventListener("hashchange", sync);
   }, []);
+  const [sourceFilter, setSourceFilter] = useState(false);
+  const [sourceSkill, setSourceSkill] = useState<SkillInfo | "all" | null>(null);
+  const sourceRecords = useSkillConflicts(apiBaseUrl, serviceRunning, records => {
+    if (records.some(record => record.action === "rejected")) {
+      toast.info(t("status.skillConflicts.newIgnored"), {
+        action: { label: t("status.skillConflicts.manage"), onClick: () => setSourceSkill("all") },
+      });
+    }
+  });
+  const sourceIds = useMemo(() => new Set(sourceRecords.conflicts.map(c => c.skill_id || c.name)), [sourceRecords.conflicts]);
+  const hasSourceRecords = (skill: SkillInfo) => sourceIds.has(skill.skillId) || sourceIds.has(skill.name);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1506,6 +1522,7 @@ export function SkillManager({
         configComplete: true,  // 由 useMemo 动态计算，这里先占位
       }));
       setSkills(list);
+      void sourceRecords.refresh();
       setError(null);
       // 同步 enabledDraft 到后端最新状态
       const draft: Record<string, boolean> = {};
@@ -1519,7 +1536,7 @@ export function SkillManager({
     } finally {
       if (isLatest()) setLoading(false);
     }
-  }, [venvDir, currentWorkspaceId, serviceRunning, apiBaseUrl, dataMode, t]);
+  }, [venvDir, currentWorkspaceId, serviceRunning, apiBaseUrl, dataMode, t, sourceRecords.refresh]);
 
   const reloadRuntimeAfterLocalInstall = useCallback(async () => {
     if (!serviceRunning || apiBaseUrl == null) return true;
@@ -1865,8 +1882,8 @@ export function SkillManager({
   // 平铺视图 / 分组聚合 / 计数 / 空状态都消费这一个派生量，避免在多处各自
   // 重复 `s.system` 判断而产生不一致（#598）。
   const visibleSkills = useMemo(
-    () => (showSystemSkills ? filteredSkills : filteredSkills.filter((s) => !s.system)),
-    [filteredSkills, showSystemSkills],
+    () => filteredSkills.filter(s => (sourceFilter ? hasSourceRecords(s) : showSystemSkills || !s.system)),
+    [filteredSkills, showSystemSkills, sourceFilter, sourceIds],
   );
 
   // ── 保存技能配置 ──
@@ -2443,6 +2460,41 @@ export function SkillManager({
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 py-6">
+      <Dialog open={!!sourceSkill} onOpenChange={open => { if (!open) setSourceSkill(null); }}>
+        <DialogContent overlayClassName="z-[1100]" className="z-[1101] sm:max-w-xl max-h-[85dvh] overflow-y-auto" aria-describedby={undefined} showCloseButton={false}>
+          <DialogHeader className="flex-row items-center justify-between gap-3 text-left">
+            <DialogTitle className="min-w-0 text-base leading-snug">{t("status.skillConflicts.title")}</DialogTitle>
+            <div className="flex shrink-0 items-center gap-1">
+              <Button size="icon-sm" variant="ghost" title={t("status.skillConflicts.refresh")} aria-label={t("status.skillConflicts.refresh")} disabled={!serviceRunning} aria-disabled={sourceRecords.busy || !serviceRunning} onClick={() => { if (!sourceRecords.busy) void sourceRecords.refresh(); }}>
+                <RotateCw size={14} aria-hidden="true" className={sourceRecords.busyVisible ? "animate-spin" : undefined} />
+              </Button>
+              {sourceSkill === "all" && <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button size="icon-sm" variant="ghost" title={t("status.skillConflicts.moreActions")} aria-label={t("status.skillConflicts.moreActions")}>
+                    <MoreHorizontal size={14} aria-hidden="true" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="z-[1102]">
+                  <DropdownMenuItem disabled={sourceRecords.busy || !serviceRunning || !sourceRecords.conflicts.length} title={t("status.skillConflicts.clearHint")} onSelect={() => { if (!sourceRecords.busy) { void sourceRecords.clear(); setSourceFilter(false); } }}>
+                    {t("status.skillConflicts.clear")}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>}
+              <DialogClose asChild>
+                <Button size="icon-sm" variant="ghost" title={t("common.close")} aria-label={t("common.close")}>
+                  <X size={14} aria-hidden="true" />
+                </Button>
+              </DialogClose>
+            </div>
+          </DialogHeader>
+          <div className="flex h-64 max-h-[45dvh] flex-col gap-3 overflow-y-auto [scrollbar-gutter:stable] text-sm" aria-busy={sourceRecords.busy}>
+            {!serviceRunning && <p className="text-muted-foreground">{t("adv.needService")}</p>}
+            {serviceRunning && !sourceRecords.loaded && !sourceRecords.error && <p className="text-muted-foreground">{t("status.skillConflicts.loading")}</p>}
+            <SkillConflictsPanel showEmpty={sourceRecords.loaded} conflicts={sourceSkill === "all" ? sourceRecords.conflicts : sourceRecords.conflicts.filter(c => c.skill_id === sourceSkill?.skillId || c.name === sourceSkill?.name)} />
+            {sourceRecords.error && <p role="alert" className="text-destructive">{sourceRecords.error}</p>}
+          </div>
+        </DialogContent>
+      </Dialog>
       {/* Tab 切换 */}
       <div className="flex flex-col md:flex-row md:items-center gap-4">
         <ToggleGroup
@@ -2641,9 +2693,9 @@ export function SkillManager({
             </Card>
           )}
           
-          {/* 分组视图开关 + 新建分类按钮 */}
-          {skillsWithConfig.length > 0 && (
+          {/* 列表筛选与来源记录 */}
             <div className="flex items-center gap-3 flex-wrap">
+              {skillsWithConfig.length > 0 && <>
               <label className="flex items-center gap-1.5 text-xs text-muted-foreground select-none">
                 <input
                   type="checkbox"
@@ -2660,6 +2712,10 @@ export function SkillManager({
                 />
                 {t("skills.category.showSystem")}
               </label>
+              {(sourceRecords.conflicts.length > 0 || sourceFilter) && <label className="flex items-center gap-1.5 text-xs text-muted-foreground select-none cursor-pointer">
+                <input type="checkbox" checked={sourceFilter} onChange={e => setSourceFilter(e.target.checked)} />
+                {t("status.skillConflicts.filter")}
+              </label>}
               <Button
                 variant="outline"
                 size="sm"
@@ -2669,8 +2725,14 @@ export function SkillManager({
               >
                 {t("skills.category.create")}
               </Button>
+              </>}
+              <Button size="sm" variant="outline" className="h-8 sm:ml-auto" onClick={() => setSourceSkill("all")}>
+                <History size={14} aria-hidden="true" />
+                {t("status.skillConflicts.viewSources")}
+                {sourceIds.size > 0 && <Badge variant="secondary" className="tabular-nums" aria-label={t("status.skillConflicts.skillCount", { count: sourceIds.size })}>{sourceIds.size}</Badge>}
+              </Button>
             </div>
-          )}
+          {sourceRecords.error && <p role="alert" className="text-sm text-destructive">{sourceRecords.error}</p>}
 
           {!groupView && (
             <div className="flex flex-col gap-3">
@@ -2678,6 +2740,7 @@ export function SkillManager({
                 <SkillCard
                   key={skill.skillId}
                   skill={skill}
+                  onViewSources={hasSourceRecords(skill) ? () => setSourceSkill(skill) : undefined}
                   expanded={expandedSkill === skill.skillId}
                   onToggleExpand={() => setExpandedSkill(expandedSkill === skill.skillId ? null : skill.skillId)}
                   onToggleEnabled={() => handleToggleEnabled(skill)}
@@ -2865,6 +2928,7 @@ export function SkillManager({
                             <SkillCard
                               key={skill.skillId}
                               skill={skill}
+                              onViewSources={hasSourceRecords(skill) ? () => setSourceSkill(skill) : undefined}
                               expanded={expandedSkill === skill.skillId}
                               onToggleExpand={() => setExpandedSkill(expandedSkill === skill.skillId ? null : skill.skillId)}
                               onToggleEnabled={() => handleToggleEnabled(skill)}

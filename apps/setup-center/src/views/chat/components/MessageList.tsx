@@ -97,6 +97,7 @@ export interface MessageListProps {
   onPlanStepAction?: (action: "skip" | "retry", stepIdx: number, description: string) => void;
   onAskAnswer?: (msgId: string, answer: string) => void;
   onRetry?: (msgId: string) => void;
+  onRetryLink?: (url: string) => void;
   onEdit?: (msgId: string) => void;
   onRegenerate?: (msgId: string) => void;
   onRewind?: (msgId: string) => void;
@@ -148,6 +149,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     searchHighlight,
     onAskAnswer,
     onRetry,
+    onRetryLink,
     onEdit,
     onRegenerate,
     onCompletionAction,
@@ -509,6 +511,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
           mdModules={mdModules}
           onAskAnswer={onAskAnswer}
           onRetry={onRetry}
+          onRetryLink={onRetryLink}
           onEdit={onEdit}
           onRegenerate={onRegenerate}
           onRewind={onRewind}
@@ -523,7 +526,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     );
   }, [
     messages.length, displayMode, apiBaseUrl, showChain, mdModules,
-    onAskAnswer, onRetry, onEdit, onRegenerate, onRewind, onSkipStep, onImagePreview,
+    onAskAnswer, onRetry, onRetryLink, onEdit, onRegenerate, onRewind, onSkipStep, onImagePreview,
     conversationId, httpApiBase, onPlanStepAction, onCompletionAction,
   ]);
 

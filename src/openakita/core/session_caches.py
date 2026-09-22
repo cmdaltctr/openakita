@@ -17,7 +17,11 @@ logger = logging.getLogger(__name__)
 
 
 def clear_session_caches(
-    agent: Any | None = None, *, conversation_id: str | None = None
+    agent: Any | None = None,
+    *,
+    conversation_id: str | None = None,
+    preserve_domain_rules: bool = False,
+    preserve_diagnostics: bool = False,
 ) -> dict[str, bool]:
     """Clear caches that are scoped to the active task / session.
 
@@ -43,7 +47,7 @@ def clear_session_caches(
             or getattr(agent, "_current_session_id", "")
             or ""
         )
-        if cid:
+        if cid and not preserve_domain_rules:
             get_domain_allowlist().clear(cid)
             cleared["domain_rules"] = True
     except Exception as exc:
@@ -65,7 +69,7 @@ def clear_session_caches(
         except Exception:
             pass
         try:
-            if hasattr(agent, "_last_link_diagnostic"):
+            if not preserve_diagnostics and hasattr(agent, "_last_link_diagnostic"):
                 agent._last_link_diagnostic = None
                 cleared["last_link_diagnostic"] = True
         except Exception:
@@ -74,7 +78,10 @@ def clear_session_caches(
             ctx = getattr(agent, "context_manager", None)
             summaries = getattr(ctx, "_previous_summaries", None) if ctx else None
             if isinstance(summaries, dict):
-                summaries.clear()
+                if conversation_id:
+                    summaries.pop(conversation_id, None)
+                else:
+                    summaries.clear()
                 cleared["context_summaries"] = True
         except Exception:
             pass

@@ -26,8 +26,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
 import { TroubleshootPanel } from "../components/TroubleshootPanel";
-import { LinkDiagnosticsPanel, type LinkDiagnostic } from "../components/LinkDiagnosticsPanel";
-import { SkillConflictsPanel } from "../components/SkillConflictsPanel";
+import { type LinkDiagnostic } from "../components/LinkDiagnosticsPanel";
 import { ProviderIcon } from "../components/ProviderIcon";
 import type { EnvMap, ViewId, WorkspaceSummary } from "../types";
 import type { UpdateInfo } from "../platform";
@@ -528,15 +527,6 @@ export function StatusView(props: StatusViewProps) {
         {(heartbeatState === "dead" && !serviceStatus?.running) && (
           <TroubleshootPanel t={t} />
         )}
-
-        {/* Link diagnostics + per-session cache reset */}
-        <LinkDiagnosticsPanel
-          httpApiBase={httpApiBase}
-          initialDiagnostic={serviceStatus?.lastLinkDiagnostic ?? null}
-        />
-
-        {/* Skill registration conflicts (multi-source same name detection) */}
-        <SkillConflictsPanel httpApiBase={httpApiBase} />
 
         {/* Auto-update row — desktop only */}
         {IS_TAURI && (

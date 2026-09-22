@@ -92,3 +92,21 @@ def test_conflict_log_capped_at_100_entries():
         # Each call records one rejection (registry already has the entry).
         _register(reg, _entry(plugin_source=f"plug-{_}"))
     assert len(reg.get_conflicts()) == 5
+
+
+async def test_conflicts_route_reports_current_source_separately_from_history(monkeypatch):
+    from types import SimpleNamespace
+
+    from openakita.api.routes import skills
+
+    registry = SkillRegistry()
+    _register(registry, _entry(path="/old"))
+    _register(registry, _entry(path="/ignored"))
+    _register(registry, _entry(path="/new"), force=True)
+    monkeypatch.setattr(skills, "_resolve_agent", lambda request: SimpleNamespace(skill_registry=registry))
+    body = await skills.list_skill_conflicts(SimpleNamespace())
+    assert body["conflicts"][0]["winner"]["path"] == "/old"
+    assert body["conflicts"][0]["active"]["path"] == "/new"
+    registry.unregister("demo")
+    body = await skills.list_skill_conflicts(SimpleNamespace())
+    assert body["conflicts"][0]["active"] is None

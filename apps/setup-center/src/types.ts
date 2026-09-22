@@ -172,6 +172,12 @@ export type ChatArtifact = {
 };
 
 export type ChatSource = {
+  error_code?: string;
+  status_code?: number;
+  content_type?: string;
+  redirect_chain?: string[];
+  conversation_id?: string;
+  recorded_at?: string;
   tool_name?: string;
   tool_use_id?: string;
   requested_url: string;

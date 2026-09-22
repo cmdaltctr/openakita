@@ -1,223 +1,115 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
-import { AlertTriangle, CheckCircle2, RefreshCw, XCircle } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { History } from "lucide-react";
 import { safeFetch } from "../providers";
 
-type ConflictSource = {
-  origin?: string;
-  plugin_source?: string;
-  path?: string;
-};
-
-type SkillConflict = {
+type ConflictSource = { origin?: string; plugin_source?: string; path?: string };
+export type SkillConflict = {
   skill_id?: string;
   name?: string;
-  action?: "rejected" | "overridden" | string;
+  action?: string;
   winner?: ConflictSource;
   shadowed?: ConflictSource;
+  active?: ConflictSource | null;
 };
 
-export interface SkillConflictsPanelProps {
-  httpApiBase: () => string;
-}
-
-function describeSource(t: TFunction, src?: ConflictSource): string {
-  if (!src) return "—";
-  const parts: string[] = [];
-  if (src.origin) parts.push(describeOrigin(t, src.origin));
-  if (src.plugin_source) parts.push(src.plugin_source);
-  if (src.path) parts.push(src.path);
-  return parts.join(" · ") || "—";
-}
-
-function describeOrigin(t: TFunction, origin?: string): string {
-  switch (origin) {
-    case "remote":
-      return t("status.skillConflicts.origin.remote");
-    case "project":
-      return t("status.skillConflicts.origin.project");
-    case "system":
-      return t("status.skillConflicts.origin.system");
-    case "marketplace":
-      return t("status.skillConflicts.origin.marketplace");
-    case "plugin":
-      return t("status.skillConflicts.origin.plugin");
-    default:
-      return origin || t("status.skillConflicts.origin.unknown");
-  }
-}
-
-export function SkillConflictsPanel({ httpApiBase }: SkillConflictsPanelProps) {
+/** Shared record state for the skill page's filter, cards and source dialog. */
+export function useSkillConflicts(apiBaseUrl: string, enabled: boolean, onNewRecords?: (records: SkillConflict[]) => void) {
   const { t } = useTranslation();
   const [conflicts, setConflicts] = useState<SkillConflict[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [clearing, setClearing] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-  const [statusText, setStatusText] = useState("");
-
-  const refresh = async (showResult = true) => {
-    setLoading(true);
-    try {
-      const resp = await safeFetch(`${httpApiBase()}/api/skills/conflicts`);
-      if (resp.ok) {
-        const body = (await resp.json()) as { conflicts?: SkillConflict[] };
-        const next = Array.isArray(body.conflicts) ? body.conflicts : [];
-        setConflicts(next);
-        if (showResult) {
-          setStatusText(t(next.length > 0
-            ? "status.skillConflicts.refreshedNonEmpty"
-            : "status.skillConflicts.refreshedEmpty"));
-        }
-      } else if (showResult) {
-        setStatusText(t("status.skillConflicts.refreshFailed"));
-      }
-    } catch {
-      if (showResult) setStatusText(t("status.skillConflicts.refreshOffline"));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const clearConflicts = async () => {
-    setClearing(true);
-    try {
-      const resp = await safeFetch(`${httpApiBase()}/api/skills/conflicts/clear`, {
-        method: "POST",
-      });
-      if (resp.ok) {
-        setConflicts([]);
-        setExpanded(false);
-        setStatusText(t("status.skillConflicts.cleared"));
-      } else {
-        setStatusText(t("status.skillConflicts.clearFailed"));
-      }
-    } catch {
-      setStatusText(t("status.skillConflicts.clearOffline"));
-    } finally {
-      setClearing(false);
-    }
-  };
-
+  const [busy, setBusy] = useState(false);
+  const [busyVisible, setBusyVisible] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+  const generation = useRef(0);
+  const seen = useRef<Set<string> | null>(null);
+  const onNewRecordsRef = useRef(onNewRecords);
+  onNewRecordsRef.current = onNewRecords;
   useEffect(() => {
-    refresh(false);
-    const onChange = () => {
-      // Slight defer so the backend has a tick to update the registry.
-      setTimeout(() => refresh(false), 200);
-    };
+    if (!busy) { setBusyVisible(false); return; }
+    const timer = window.setTimeout(() => setBusyVisible(true), 200);
+    return () => window.clearTimeout(timer);
+  }, [busy]);
+  const refresh = useCallback(async (signal?: AbortSignal) => {
+    if (!enabled) return;
+    const request = ++generation.current;
+    const current = () => request === generation.current && !signal?.aborted;
+    setBusy(true);
+    try {
+      const resp = await safeFetch(`${apiBaseUrl}/api/skills/conflicts`, { signal });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const body = await resp.json();
+      if (current()) {
+        const next: SkillConflict[] = Array.isArray(body.conflicts) ? body.conflicts : [];
+        // Active metadata can change independently of the historical load event.
+        const key = ({ active: _active, ...record }: SkillConflict) => JSON.stringify(record);
+        const newRecords = seen.current ? next.filter(record => !seen.current!.has(key(record))) : [];
+        seen.current = new Set(next.map(key));
+        setConflicts(next);
+        setLoaded(true); setError("");
+        if (newRecords.length) onNewRecordsRef.current?.(newRecords);
+      }
+    } catch {
+      if (current()) setError(t("status.skillConflicts.refreshFailed"));
+    } finally { if (current()) setBusy(false); }
+  }, [apiBaseUrl, enabled, t]);
+  useEffect(() => {
+    const controller = new AbortController();
+    seen.current = null;
+    setConflicts([]); setError(""); setBusy(false); setLoaded(false); setBusyVisible(false);
+    void refresh(controller.signal);
+    const onChange = () => void refresh(controller.signal);
+    const onFocus = () => { if (!document.hidden) onChange(); };
     window.addEventListener("openakita:skills-changed", onChange);
-    const tabFocus = () => {
-      if (!document.hidden) refresh();
-    };
-    document.addEventListener("visibilitychange", tabFocus);
+    document.addEventListener("visibilitychange", onFocus);
     return () => {
+      generation.current++;
+      controller.abort();
       window.removeEventListener("openakita:skills-changed", onChange);
-      document.removeEventListener("visibilitychange", tabFocus);
+      document.removeEventListener("visibilitychange", onFocus);
     };
-  }, []);
+  }, [refresh]);
+  async function clear() {
+    const request = ++generation.current;
+    setBusy(true);
+    try {
+      const resp = await safeFetch(`${apiBaseUrl}/api/skills/conflicts/clear`, { method: "POST" });
+      const body = await resp.json();
+      if (!resp.ok || !body.ok) throw new Error();
+      if (request === generation.current) { seen.current = new Set(); setConflicts([]); setLoaded(true); setError(""); }
+    } catch { if (request === generation.current) setError(t("status.skillConflicts.clearFailed")); }
+    finally { if (request === generation.current) setBusy(false); }
+  }
+  return { conflicts, busy, busyVisible: busy && busyVisible, loaded, error, refresh, clear };
+}
 
-  const total = conflicts.length;
-
-  return (
-    <div className="statusPanelRow">
-      <div className="statusPanelIcon">
-        <AlertTriangle size={18} />
+export function SkillConflictsPanel({ conflicts, showEmpty = true }: { conflicts: SkillConflict[]; showEmpty?: boolean }) {
+  const { t } = useTranslation();
+  if (!conflicts.length) {
+    return showEmpty ? (
+      <div className="flex flex-1 flex-col items-center justify-center px-4 py-8 text-center">
+        <History size={40} className="mb-3 shrink-0 text-muted-foreground/30" aria-hidden="true" />
+        <p className="text-sm text-muted-foreground">{t("status.skillConflicts.empty")}</p>
       </div>
-      <div className="statusPanelInfo" style={{ minWidth: 0 }}>
-        <div className="statusPanelTitle">
-          {t("status.skillConflicts.title")}
+    ) : null;
+  }
+  const source = (s?: ConflictSource) => s ? [
+    s.origin ? t(`status.skillConflicts.origin.${s.origin}`, { defaultValue: s.origin }) : "",
+    s.plugin_source, s.path,
+  ].filter(Boolean).join(" · ") || "—" : "—";
+  return <div className="shrink-0 space-y-3 text-sm">
+    {[...conflicts].reverse().map((c, i) => <div key={i} className="rounded-md border border-border p-3 space-y-2 break-all">
+      <p className="font-medium">{c.name || c.skill_id}</p>
+      {c.active !== undefined && <p>{c.active ? t("status.skillConflicts.activeSource", { source: source(c.active) }) : t("status.skillConflicts.notLoaded")}</p>}
+      {c.active === undefined && <p>{t("status.skillConflicts.currentSource", { source: source(c.winner) })}</p>}
+      <details className="text-muted-foreground">
+        <summary className="cursor-pointer">{t("status.skillConflicts.loadDetails")}</summary>
+        <div className="mt-2 space-y-2">
+          <p>{t(c.action === "overridden" ? "status.skillConflicts.actionOverridden" : "status.skillConflicts.actionRejected")}</p>
+          {c.active !== undefined && <p>{t("status.skillConflicts.currentSource", { source: source(c.winner) })}</p>}
+          <p>{t("status.skillConflicts.shadowedSource", { source: source(c.shadowed) })}</p>
         </div>
-        <div className="statusPanelDesc">
-          {total === 0 ? (
-            <span style={{ opacity: 0.7 }}>
-              {t("status.skillConflicts.empty")}
-            </span>
-          ) : (
-            <span style={{ color: "#c0392b" }}>
-              {t("status.skillConflicts.nonEmpty", {
-                count: total,
-              })}
-            </span>
-          )}
-          {statusText && (
-            <div style={{ marginTop: 4, fontSize: 12, opacity: 0.75 }}>
-              {statusText}
-            </div>
-          )}
-          {expanded && total > 0 && (
-            <ul
-              style={{
-                marginTop: 6,
-                paddingLeft: 16,
-                fontSize: 12,
-                opacity: 0.85,
-                maxHeight: 180,
-                overflow: "auto",
-              }}
-            >
-              {conflicts.map((c, i) => {
-                const action = c.action === "overridden"
-                  ? t("status.skillConflicts.actionOverridden")
-                  : t("status.skillConflicts.actionRejected");
-                return (
-                  <li key={i} style={{ marginBottom: 4 }}>
-                    <strong>{c.skill_id || c.name || t("status.skillConflicts.unknownSkill")}</strong> · {action}
-                    <div style={{ opacity: 0.75 }}>
-                      {t("status.skillConflicts.currentSource", {
-                        source: describeSource(t, c.winner),
-                      })}
-                    </div>
-                    <div style={{ opacity: 0.6 }}>
-                      {t("status.skillConflicts.shadowedSource", {
-                        source: describeSource(t, c.shadowed),
-                      })}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-      </div>
-      <div className="statusPanelActions" style={{ display: "flex", gap: 6 }}>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-7 text-xs px-2.5"
-          onClick={() => setExpanded((v) => !v)}
-          disabled={total === 0}
-        >
-          {expanded
-            ? t("status.skillConflicts.collapse")
-            : t("status.skillConflicts.expand")}
-        </Button>
-        {total > 0 && (
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 text-xs px-2.5"
-            onClick={clearConflicts}
-            disabled={clearing || loading}
-            title={t("status.skillConflicts.clearHint")}
-          >
-            {clearing ? <RefreshCw size={12} className="animate-spin" /> : <XCircle size={12} />}
-            {clearing ? t("status.skillConflicts.clearing") : t("status.skillConflicts.clear")}
-          </Button>
-        )}
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-7 text-xs px-2.5"
-          onClick={() => refresh(true)}
-          disabled={loading || clearing}
-        >
-          {loading ? <RefreshCw size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
-          {loading
-            ? t("status.skillConflicts.refreshing")
-            : t("status.skillConflicts.refresh")}
-        </Button>
-      </div>
-    </div>
-  );
+      </details>
+    </div>)}
+  </div>;
 }

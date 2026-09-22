@@ -35,6 +35,7 @@ export function MessageParts({
   onAskAnswer,
   onPlanStepAction,
   onRetry,
+  onRetryLink,
   apiBaseUrl,
   conversationId,
   httpApiBase,
@@ -53,6 +54,7 @@ export function MessageParts({
   onAskAnswer?: (msgId: string, answer: string) => void;
   onPlanStepAction?: (action: "skip" | "retry", stepIdx: number, description: string) => void;
   onRetry?: (msgId: string) => void;
+  onRetryLink?: (url: string) => void;
   apiBaseUrl?: string;
   conversationId?: string;
   httpApiBase?: () => string;
@@ -73,7 +75,7 @@ export function MessageParts({
               <OrgTimelineCard key={part.id} entries={msg.orgTimeline} streaming={streaming} />
             ) : null;
           case "sources":
-            return <SourceStrip key={part.id} sources={msg.sources} conversationId={conversationId} httpApiBase={httpApiBase} />;
+            return <SourceStrip key={part.id} sources={msg.sources} onRetryLink={onRetryLink} conversationId={conversationId} httpApiBase={httpApiBase} />;
           case "mcp":
             return <MCPCallStrip key={part.id} calls={msg.mcpCalls} />;
           case "plan":

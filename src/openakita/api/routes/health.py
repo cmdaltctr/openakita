@@ -592,8 +592,10 @@ async def logs_health_summary():
 
 
 @router.get("/api/diagnostics/last-link")
-async def last_link_diagnostic(request: Request):
-    """Return the last web_fetch / browser link diagnostic for the Status panel."""
+async def last_link_diagnostic(request: Request, conversation_id: str | None = None):
+    """Return the latest runtime record, or only the requested conversation's record."""
+    if conversation_id is not None:
+        return getattr(request.app.state, "link_diagnostics", {}).get(conversation_id, {})
     return getattr(request.app.state, "last_link_diagnostic", None) or {}
 
 
@@ -630,13 +632,64 @@ async def deprecated_redirect_stats() -> dict[str, Any]:
     }
 
 
-@router.post("/api/diagnostics/clear-session-caches")
-async def clear_session_caches_endpoint(request: Request, conversation_id: str | None = None):
-    """User-triggered, non-destructive cache clear for the active session.
+@router.get("/api/diagnostics/cache-targets")
+async def cache_targets(request: Request):
+    """List existing runtime instances independently of web-read diagnostics."""
+    pool = getattr(request.app.state, "agent_pool", None)
+    if pool is not None:
+        targets = [
+            {"conversation_id": session["session_id"], "profile_id": agent["profile_id"]}
+            for session in pool.get_stats().get("sessions", [])
+            for agent in session.get("agents", [])
+        ]
+        session_manager = getattr(request.app.state, "session_manager", None)
 
-    Clears: WebFetch URL cache, ReasoningEngine read-only tool cache, browser
-    navigation memory, last link diagnostic, per-conversation compression
-    summaries.
+        def resolve_labels():
+            from openakita.agents.profile import get_profile_store
+
+            from .sessions import _session_list_item
+
+            titles = {}
+            names = {}
+            for target in targets:
+                conversation_id = target["conversation_id"]
+                profile_id = target["profile_id"]
+                if conversation_id not in titles:
+                    titles[conversation_id] = ""
+                    if session_manager is not None:
+                        session = session_manager.get_session(
+                            channel="desktop", chat_id=conversation_id,
+                            user_id="desktop_user", create_if_missing=False,
+                        ) or session_manager.get_session_by_id(conversation_id)
+                        if session is not None:
+                            titles[conversation_id] = _session_list_item(session)["title"]
+                if profile_id not in names:
+                    profile = get_profile_store().get(profile_id)
+                    names[profile_id] = profile.name if profile else ""
+                target["conversation_title"] = titles[conversation_id]
+                target["profile_name"] = names[profile_id]
+
+        # Session recovery may read disk; labels never change the runtime target keys.
+        await asyncio.to_thread(resolve_labels)
+        return {"targets": targets}
+    return {
+        "targets": [{"conversation_id": "", "profile_id": ""}]
+        if getattr(request.app.state, "agent", None) is not None
+        else []
+    }
+
+
+@router.post("/api/diagnostics/clear-session-caches")
+async def clear_session_caches_endpoint(
+    request: Request,
+    conversation_id: str | None = None,
+    profile_id: str | None = None,
+    require_runtime: bool = False,
+):
+    """Clear runtime caches for an explicitly selected agent, preserving access rules.
+
+    Web caches are shared; tool/navigation caches belong to the resolved agent.
+    Never fall back to another agent when an explicit conversation has expired.
     """
     from openakita.core.session_caches import clear_session_caches
 
@@ -644,14 +697,42 @@ async def clear_session_caches_endpoint(request: Request, conversation_id: str |
     try:
         from .chat import _get_existing_agent, _resolve_agent
 
-        agent = _get_existing_agent(request, conversation_id or "") or getattr(
-            request.app.state, "agent", None
-        )
-        actual_agent = _resolve_agent(agent) if agent else None
-    except Exception:
-        pass
+        pool = getattr(request.app.state, "agent_pool", None)
+        if conversation_id and pool is not None:
+            agent = (
+                pool.get_existing(conversation_id, profile_id)
+                if profile_id
+                else pool.get_existing(conversation_id)
+            )
+            if agent is None:
+                from fastapi import HTTPException
 
-    cleared = clear_session_caches(actual_agent)
+                raise HTTPException(status_code=404, detail="Conversation runtime has expired")
+        else:
+            agent = _get_existing_agent(request, conversation_id or "")
+            if conversation_id and agent is not None:
+                active_id = getattr(agent, "_current_conversation_id", None) or getattr(
+                    agent, "_current_session_id", None
+                )
+                if active_id != conversation_id:
+                    from fastapi import HTTPException
+
+                    raise HTTPException(status_code=404, detail="Conversation runtime unavailable")
+        actual_agent = _resolve_agent(agent) if agent else None
+    except ImportError:
+        actual_agent = None
+
+    if (conversation_id or require_runtime) and actual_agent is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="Conversation runtime unavailable")
+
+    cleared = clear_session_caches(
+        actual_agent,
+        conversation_id=conversation_id,
+        preserve_domain_rules=True,
+        preserve_diagnostics=True,
+    )
     return {"ok": True, "cleared": cleared}
 
 

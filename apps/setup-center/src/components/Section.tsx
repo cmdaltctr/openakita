@@ -27,14 +27,14 @@ export function Section({
       ref={panelRef}
       data-panel-id={panelId}
       className={cn(
-        "group rounded-xl border border-border/80 bg-card/60 transition-colors open:border-primary/35 open:bg-card",
+        "group rounded-xl border border-border/80 bg-card/60 transition-colors open:border-primary/35 open:bg-card [&[open]>summary>span>svg]:rotate-90",
         className,
       )}
     >
       <summary className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5 text-sm select-none list-none transition-colors hover:bg-accent/40 [&::-webkit-details-marker]:hidden">
         <span className="flex min-w-0 items-center gap-2">
           {children ? (
-            <ChevronRight className="size-4 shrink-0 transition-transform group-open:rotate-90 text-muted-foreground" />
+            <ChevronRight className="size-4 shrink-0 transition-transform text-muted-foreground" />
           ) : (
             <span className="size-4 shrink-0" />
           )}
@@ -58,4 +58,3 @@ export function Section({
     </details>
   );
 }
-
