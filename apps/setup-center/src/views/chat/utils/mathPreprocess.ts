@@ -77,7 +77,10 @@ function scrubBacktickNoise(text: string): string {
 
   // 清掉成对/孤立的双反引号噪声（两遍以处理相邻情形）。
   for (let pass = 0; pass < 2; pass += 1) {
-    out = out.replace(/(?<!`)``(?!`)\s*(?<!`)``(?!`)/g, "");
+    // Capture and restore the left boundary instead of using lookbehind, which
+    // older WKWebView engines cannot compile. The pairs must be separated by
+    // whitespace: adjacent backticks are a fence, not two noise markers.
+    out = out.replace(/(^|[^`])``(?!`)\s+``(?!`)/g, "$1");
     out = out.replace(/(^|[^`])``(?=\s|[.,;:!?)\]'"\u2014\u2013-]|$)/g, "$1");
   }
   return out;
