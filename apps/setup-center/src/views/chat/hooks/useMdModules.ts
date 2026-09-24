@@ -111,7 +111,7 @@ function loadMdModules(): Promise<MdModules | null> {
 
   _loading = Promise.all([
     import("react-markdown"),
-    import("remark-gfm"),
+    import("../utils/remarkGfm"),
     import("remark-math"),
     import("rehype-highlight"),
     import("rehype-raw"),
@@ -119,21 +119,18 @@ function loadMdModules(): Promise<MdModules | null> {
     // 带 LRU 缓存的 rehype-katex 替代，治流式逐 token 重渲染的卡顿，见 utils/katexMemo.ts。
     import("../utils/katexMemo"),
     // LaTeX 定界符归一（\[..\]→$$、\(..\)→$、货币转义），见 utils/mathPreprocess.ts。
-    import("../utils/mathPreprocess"),
+    import("../components/SafeMarkdown"),
     // KaTeX 自带的样式表（字体度量、定位 span 的 class）。动态 import 让
     // Vite 把它打进 markdown 的懒加载 chunk，只有真正渲染消息时才拉取。
     import("katex/dist/katex.min.css"),
-  ]).then(([md, gfm, math, hl, raw, sanitize, katexMemo, mathPre]) => {
+  ]).then(([md, gfm, math, hl, raw, sanitize, katexMemo, safeMarkdown]) => {
     const schema = buildSanitizeSchema((sanitize as any).defaultSchema);
     const RawMarkdown = md.default;
-    const { preprocessMath } = mathPre;
     // 统一入口：所有消费方（聊天 + 记忆 + Org 面板 + 反馈 + …）共享这一个被包装过的
     // 组件。在内容进入 react-markdown 之前先做一次 LaTeX 定界符归一，保证全部渲染
     // 界面行为完全一致——避免"插件全局开、预处理只在聊天"那种割裂。
     const ReactMarkdown = ((props: any) => {
-      const { children, ...rest } = props;
-      const processed = typeof children === "string" ? preprocessMath(children) : children;
-      return createElement(RawMarkdown as any, rest, processed);
+      return createElement(safeMarkdown.SafeMarkdown, { ...props, renderer: RawMarkdown });
     }) as unknown as MdModules["ReactMarkdown"];
     _cached = {
       ReactMarkdown,

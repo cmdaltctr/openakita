@@ -3,7 +3,7 @@ import { usePluginChanges } from "../hooks/usePluginChanges";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import remarkGfm from "./chat/utils/remarkGfm";
 import { safeFetch } from "../providers";
 import { showInFolder, downloadFile, openFileDialog } from "../platform";
 import { IconCode, IconPlug, IconFileText2, IconPackage, IconBook, IconGear, IconShield, IconFolderOpen, IconDownload, IconTerminal, IconHeartPulse, IconRefresh } from "../icons";
